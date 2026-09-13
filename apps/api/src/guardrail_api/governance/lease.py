@@ -33,6 +33,7 @@ async def claim_runs(
     now: datetime | None = None,
     statuses: Sequence[RunStatus] | None = None,
     count_attempt: bool = True,
+    mark_running: bool = True,
 ) -> list[AgentRun]:
     """原子领取待执行的 run。租约已过期的 RUNNING 会被视为可领取(崩溃恢复入口)。
 
@@ -42,6 +43,11 @@ async def claim_runs(
 
     `count_attempt=False` 用于补偿:attempt 是「这条 run 被推进了几次」,
     补偿不是推进正向计划,把它算进去会让退避和"重试次数用完了吗"的判断失真。
+
+    `mark_running=False` 也用于补偿。默认的「领到就置 RUNNING」是为正向推进准备的
+    (心跳的 WHERE 里有 status=RUNNING)。但补偿期间一旦置成 RUNNING,就落进了
+    `CLAIMABLE_STATUSES`:进程若在这个窗口被 kill,租约过期后普通 worker 会把这条
+    已经被撤掉一半的 run 当未完成的任务领走重跑。补偿要的是租约,不是"改成在跑"。
     """
     now = now or utcnow()
     statement = select(AgentRun).where(
@@ -64,7 +70,8 @@ async def claim_runs(
             run.attempt += 1
         # 被领取即视为在跑。心跳的 WHERE 条件里有 status=RUNNING ——
         # 如果这里不落 RUNNING,第一个步骤执行期间的心跳会被自己拒掉。
-        run.status = RunStatus.RUNNING
+        if mark_running:
+            run.status = RunStatus.RUNNING
     await session.flush()
     return runs
 

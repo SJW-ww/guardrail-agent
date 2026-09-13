@@ -25,6 +25,7 @@ from guardrail_api.config import Settings, get_settings
 from guardrail_api.db import dispose_engine, get_session_factory
 from guardrail_api.governance import lease
 from guardrail_api.governance.executor import (
+    CHAOS_AFTER_COMPENSATION_COMMIT,
     CHAOS_AFTER_TOOL_WRITE,
     CHAOS_BEFORE_STEP_TXN,
     ChaosHook,
@@ -35,10 +36,13 @@ logger = logging.getLogger("guardrail.worker")
 
 
 def build_chaos(
-    *, crash_before_step: int | None = None, crash_during_step: int | None = None
+    *,
+    crash_before_step: int | None = None,
+    crash_during_step: int | None = None,
+    crash_after_compensation: int | None = None,
 ) -> ChaosHook | None:
     """把命令行开关翻译成执行器能用的钩子。"""
-    if crash_before_step is None and crash_during_step is None:
+    if crash_before_step is None and crash_during_step is None and crash_after_compensation is None:
         return None
 
     def hook(event: str, seq: int) -> None:
@@ -46,6 +50,11 @@ def build_chaos(
             _die(f"第 {seq} 步的事务还没开始,进程被 SIGKILL(已完成的前几步保持提交)")
         if event == CHAOS_AFTER_TOOL_WRITE and seq == crash_during_step:
             _die(f"第 {seq} 步业务数据已写、事务尚未提交,进程被 SIGKILL(应整体回滚)")
+        if event == CHAOS_AFTER_COMPENSATION_COMMIT and seq == crash_after_compensation:
+            _die(
+                f"第 {seq} 步的补偿已提交、整轮补偿还没收尾,进程被 SIGKILL"
+                "(run 不得被普通 worker 领走;重新补偿不得撤第二次)"
+            )
 
     return hook
 
@@ -63,6 +72,8 @@ async def run_worker(
     poll_interval: float = 1.0,
     crash_before_step: int | None = None,
     crash_during_step: int | None = None,
+    crash_after_compensation: int | None = None,
+    compensate: bool = False,
     settings: Settings | None = None,
 ) -> int:
     settings = settings or get_settings()
@@ -70,9 +81,30 @@ async def run_worker(
     executor = RunExecutor(
         factory,
         worker_id=worker_id,
-        chaos=build_chaos(crash_before_step=crash_before_step, crash_during_step=crash_during_step),
+        chaos=build_chaos(
+            crash_before_step=crash_before_step,
+            crash_during_step=crash_during_step,
+            crash_after_compensation=crash_after_compensation,
+        ),
         settings=settings,
     )
+
+    if compensate:
+        # 补偿走一条独立的进程入口:它要动的是一个**已经失败**的 run,
+        # 和"领一个待推进的任务"是两件事(见 lease.claim_runs 的 statuses)。
+        if run_uid is None:
+            raise ValueError("--compensate 需要同时给 --run <run_uid>")
+        outcome = await executor.compensate(
+            run_uid, actor=await executor.actor_of(run_uid), force=True
+        )
+        logger.info(
+            "run=%s 补偿 status=%s 撤销 %d 步,blockers=%s",
+            run_uid,
+            outcome.status.value,
+            len(outcome.compensated),
+            outcome.blockers or "无",
+        )
+        return 1
 
     processed = 0
     while True:
@@ -131,6 +163,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--crash-before-step", type=int, default=None)
     parser.add_argument("--crash-during-step", type=int, default=None)
+    parser.add_argument(
+        "--crash-after-compensation",
+        type=int,
+        default=None,
+        help="第 N 步的补偿已提交、整轮补偿还没收尾时 SIGKILL",
+    )
+    parser.add_argument(
+        "--compensate",
+        action="store_true",
+        help="不推进计划,改为对 --run 指定的已失败 run 执行补偿",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -147,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
                 poll_interval=args.poll_interval,
                 crash_before_step=args.crash_before_step,
                 crash_during_step=args.crash_during_step,
+                crash_after_compensation=args.crash_after_compensation,
+                compensate=args.compensate,
             )
         finally:
             await dispose_engine()

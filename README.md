@@ -214,6 +214,12 @@ make demo-governance
 `create_refund` 只创建 PENDING 工单,所以它的补偿就是把这笔申请关掉 ——
 钱从头到尾没动过。
 
+**已知边界(不是 bug,是被追问时该答得出的地方):** 补偿没有心跳续约。
+单轮补偿若超过 `LEASE_SECONDS`,理论上会有第二个补偿并发进来 ——
+重复写入由幂等账本兜住(不会关两次单),状态标记与终态是同一次提交(不会出现
+"标记说撤过了、状态还是旧的"分裂态)。当前补偿是几步写操作,远小于租约窗口;
+真要跑长补偿,应该像正向执行那样加心跳。
+
 ## 规划器:LLM 做决策,不做检索
 
 `PLANNER_BACKEND=llm` 时接 OpenAI 兼容接口(`deterministic` 为默认,离线可跑,CI 不依赖外部服务)。
@@ -250,6 +256,25 @@ open http://localhost:3000
 cd apps/api && uv sync && uv run uvicorn guardrail_api.main:app --reload   # 后端
 npm install && npm run dev                                                # 前端
 ```
+
+## 崩溃矩阵(W7)
+
+「可恢复」不是一句形容词。每个崩溃点都**真 SIGKILL 一次**,然后断言不变量还成立:
+
+| 崩溃点 | 怎么杀 | 必须成立 | 谁守着 |
+| --- | --- | --- | --- |
+| 步骤之间 | `--crash-before-step N` | 已完成步骤保持提交;重启从断点续跑,不重放 | `test_kill9_between_steps_resumes_without_repeating` |
+| 事务之中 | `--crash-during-step N` | 业务写 / 审计写 / 幂等账本一起回滚,重跑只写一次 | `test_kill9_inside_step_rolls_back_business_audit_and_idempotency` |
+| 审批之中 | 进程退出(等审批不持租约) | 待审批的 run 不会被 worker 领走;批准后只写一次 | `test_crash_while_waiting_for_approval_is_not_picked_up` |
+| 补偿之中 | `--crash-after-compensation N` | run 留在 FAILED、不被普通 worker 领走;重新补偿命中的是幂等账本 | `test_crash_mid_compensation_is_not_redriven_or_double_rolled_back` |
+
+两格是补出来的,而且补的过程抓到了一个真问题:补偿之前用 `claim_runs` 领租约时会把
+run 置成 `RUNNING`,而 `RUNNING` 属于「可被领取」—— 补偿撤到一半被 kill,租约一过期
+就会被普通 worker 当成没跑完的任务领走,跳过已被撤掉的那一步去重跑失败那一步,
+极端情况下把 run 推到 `SUCCEEDED`,而库里是半成品。修法:补偿领租约但不改状态
+(`mark_running=False`),让它留在 `FAILED`;`FAILED` 不在可领取集合里。
+
+这四个开关只用于测试与演示,生产环境永远不传。
 
 ## 测试
 
@@ -308,8 +333,8 @@ GuardRail/
 | W4-2 | 双人复核:大额操作两个不同角色签字,金额未知从严 | ✅ |
 | W5 | 多步编排:步骤依赖 + 参数引用 + 计划校验 + 只读额度工具 | ✅ |
 | W6 | 补偿 Saga:声明驱动 · 逆序 · 撤不干净就停手 · 幂等 · REST/UI 入口 | ✅ |
-| W7 | 对抗演示(prompt injection 被策略拦下)+ 崩溃矩阵 | ⬜ |
-| W8 | 开源收口:README 拆「已实现 / 规划中」 | ⬜ |
+| W7 | 崩溃矩阵:四种崩溃点 × 不变量是否成立(真 SIGKILL) | ✅ |
+| W8 | 开源收口:README 拆「已实现 / 规划中」+ 架构图标状态 | ✅ |
 | 规划中 | MCP 传输层 · OTel/Langfuse · 指标看板 · 评测门禁 | ⬜ |
 
 ## 本地要求
