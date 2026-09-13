@@ -753,8 +753,8 @@
         "tags": [
           "planner"
         ],
-        "summary": "生成提议(不执行)",
-        "description": "生成提议,但**不执行**。返回里带策略引擎的裁决与理由 —— 提议卡片要能解释自己。",
+        "summary": "生成计划(不执行)",
+        "description": "生成计划,但**不执行**。每一步都带策略引擎的裁决与理由 —— 提议卡片要能解释自己。",
         "operationId": "draft_proposal_api_planner_draft_post",
         "parameters": [
           {
@@ -790,7 +790,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Proposal"
+                  "$ref": "#/components/schemas/Plan"
                 }
               }
             }
@@ -1506,7 +1506,7 @@
           "from_intent": {
             "type": "boolean",
             "title": "From Intent",
-            "description": "忽略 steps,由规划器从 goal 生成一步计划(规则或 LLM,见 PLANNER_BACKEND)",
+            "description": "忽略 steps,由规划器从 goal 生成计划(一步或多步,规则或 LLM,见 PLANNER_BACKEND)",
             "default": false
           }
         },
@@ -1882,6 +1882,146 @@
         ],
         "title": "OrderView"
       },
+      "Plan": {
+        "properties": {
+          "goal": {
+            "type": "string",
+            "title": "Goal",
+            "description": "这次执行要达成什么,用人话说"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PlanStep"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Steps",
+            "description": "至少一步"
+          },
+          "rationale": {
+            "type": "string",
+            "title": "Rationale",
+            "description": "为什么这么编排,给审批人看",
+            "default": ""
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence",
+            "description": "依据的事实"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "default": 0.8
+          },
+          "planner": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "llm",
+              "manual"
+            ],
+            "title": "Planner",
+            "description": "这份计划出自哪条链路",
+            "default": "deterministic"
+          }
+        },
+        "type": "object",
+        "required": [
+          "goal",
+          "steps"
+        ],
+        "title": "Plan",
+        "description": "一次执行的完整计划。落库之后就是 `agent_run.plan`,执行器按 seq 顺序推进。"
+      },
+      "PlanStep": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Seq",
+            "description": "步骤号,从 1 开始;执行顺序就是 seq 顺序"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action",
+            "description": "要调用的工具名,必须在工具清单内"
+          },
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Arguments",
+            "description": "工具入参,必须满足该工具的 JSON Schema;可以用 {\"$ref\": \"1.ticket_id\"} 引用更早步骤的产出"
+          },
+          "depends_on": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Depends On",
+            "description": "必须等哪些步骤成功;只能指向更早的步骤"
+          },
+          "rationale": {
+            "type": "string",
+            "title": "Rationale",
+            "description": "为什么这么做,给审批人看"
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence",
+            "description": "依据的事实"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "description": "规划器对这一步的把握程度",
+            "default": 0.8
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level",
+            "description": "工具声明的风险等级,由系统填写",
+            "default": ""
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "description": "规划器是否**额外**要求人工审批;最终要不要人批,由策略引擎在执行时裁决",
+            "default": false
+          },
+          "policy_decision": {
+            "type": "string",
+            "title": "Policy Decision",
+            "description": "策略引擎裁决:ALLOW / REQUIRE_APPROVAL",
+            "default": ""
+          },
+          "policy_reason": {
+            "type": "string",
+            "title": "Policy Reason",
+            "description": "裁决理由,给审批人看",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq",
+          "action",
+          "arguments",
+          "rationale"
+        ],
+        "title": "PlanStep",
+        "description": "计划里的一步。校验规则见 `governance.plan.validate`。"
+      },
       "PlannedStepIn": {
         "properties": {
           "seq": {
@@ -1904,6 +2044,14 @@
             "type": "boolean",
             "title": "Requires Approval",
             "default": false
+          },
+          "depends_on": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Depends On",
+            "description": "必须等哪些更早的步骤成功;参数里可以用 $ref 取它们的产出"
           }
         },
         "type": "object",
@@ -1912,84 +2060,6 @@
           "tool"
         ],
         "title": "PlannedStepIn"
-      },
-      "Proposal": {
-        "properties": {
-          "action": {
-            "type": "string",
-            "title": "Action",
-            "description": "要调用的工具名,必须在工具清单内"
-          },
-          "arguments": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Arguments",
-            "description": "工具入参,必须满足该工具的 JSON Schema"
-          },
-          "rationale": {
-            "type": "string",
-            "title": "Rationale",
-            "description": "为什么这么做,给审批人看"
-          },
-          "evidence": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Evidence",
-            "description": "依据的事实"
-          },
-          "confidence": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Confidence",
-            "description": "规划器对这条提议的把握程度"
-          },
-          "risk_level": {
-            "type": "string",
-            "title": "Risk Level",
-            "description": "工具声明的风险等级,由系统填写",
-            "default": ""
-          },
-          "requires_approval": {
-            "type": "boolean",
-            "title": "Requires Approval",
-            "description": "规划器是否**额外**要求人工审批;最终要不要人批,由策略引擎在执行时裁决",
-            "default": false
-          },
-          "planner": {
-            "type": "string",
-            "enum": [
-              "deterministic",
-              "llm"
-            ],
-            "title": "Planner",
-            "description": "这条提议出自哪条规划链路",
-            "default": "deterministic"
-          },
-          "policy_decision": {
-            "type": "string",
-            "title": "Policy Decision",
-            "description": "策略引擎裁决:ALLOW / REQUIRE_APPROVAL",
-            "default": ""
-          },
-          "policy_reason": {
-            "type": "string",
-            "title": "Policy Reason",
-            "description": "裁决理由,给审批人看",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "action",
-          "arguments",
-          "rationale",
-          "confidence"
-        ],
-        "title": "Proposal",
-        "description": "一条可校验、可展示、可审批的提议。"
       },
       "ReadyResponse": {
         "properties": {

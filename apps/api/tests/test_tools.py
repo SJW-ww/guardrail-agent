@@ -30,7 +30,13 @@ async def ping_snapshot(context: ToolContext, params: PingParams) -> dict:
 def test_all_tools_are_discovered_by_module_scan() -> None:
     tools = load_tools()
 
-    assert tools.names() == ["close_ticket", "create_refund", "query_logistics", "query_order"]
+    assert tools.names() == [
+        "close_ticket",
+        "create_refund",
+        "query_logistics",
+        "query_order",
+        "query_refundable",
+    ]
 
 
 def test_only_read_only_tools_have_no_side_effect() -> None:

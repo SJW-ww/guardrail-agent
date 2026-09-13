@@ -6,6 +6,7 @@
 生产里同一个 run 由 worker 拉取执行,两条路径跑的是同一份执行器。
 """
 
+import contextlib
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -17,9 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from guardrail_api.api.deps import ActorDep, normalize_actor
 from guardrail_api.config import get_settings
 from guardrail_api.db import get_session, get_session_factory
-from guardrail_api.domain.errors import PolicyDenied, RuleViolation
+from guardrail_api.domain.errors import PlanError, PolicyDenied, RuleViolation
+from guardrail_api.governance import plan as plan_module
 from guardrail_api.governance import policy, trace
-from guardrail_api.governance.executor import PlannedStep, RunExecutor, create_run
+from guardrail_api.governance.executor import (
+    PlannedStep,
+    RunExecutor,
+    create_run,
+    load_step_results,
+)
 from guardrail_api.governance.policy import PolicyDecision
 from guardrail_api.models import AgentRun, AgentStep, RunStatus, StepKind, StepStatus
 from guardrail_api.planner import draft
@@ -40,6 +47,9 @@ class PlannedStepIn(BaseModel):
     tool: str = Field(min_length=1, max_length=64)
     args: dict[str, Any] = Field(default_factory=dict)
     requires_approval: bool = False
+    depends_on: list[int] = Field(
+        default_factory=list, description="必须等哪些更早的步骤成功;参数里可以用 $ref 取它们的产出"
+    )
 
 
 class CreateRunRequest(BaseModel):
@@ -47,7 +57,7 @@ class CreateRunRequest(BaseModel):
     steps: list[PlannedStepIn] = Field(default_factory=list)
     from_intent: bool = Field(
         default=False,
-        description="忽略 steps,由规划器从 goal 生成一步计划(规则或 LLM,见 PLANNER_BACKEND)",
+        description="忽略 steps,由规划器从 goal 生成计划(一步或多步,规则或 LLM,见 PLANNER_BACKEND)",
     )
 
 
@@ -154,14 +164,16 @@ async def _by_uid(session: AsyncSession, run_uid: str) -> AgentRun:
 @router.post("", response_model=RunDetail, summary="登记一次执行(此时无任何副作用)")
 async def create(body: CreateRunRequest, session: SessionDep, actor: ActorDep) -> RunDetail:
     if body.from_intent:
-        proposal = await draft(session, body.goal, actor=actor)
+        plan = await draft(session, body.goal, actor=actor)
         steps = [
             PlannedStep(
-                seq=1,
-                tool=proposal.action,
-                args=proposal.arguments,
-                requires_approval=proposal.requires_approval,
+                seq=step.seq,
+                tool=step.action,
+                args=step.arguments,
+                requires_approval=step.requires_approval,
+                depends_on=tuple(step.depends_on),
             )
+            for step in plan.steps
         ]
     else:
         if not body.steps:
@@ -172,6 +184,7 @@ async def create(body: CreateRunRequest, session: SessionDep, actor: ActorDep) -
                 tool=item.tool,
                 args=item.args,
                 requires_approval=item.requires_approval,
+                depends_on=tuple(item.depends_on),
             )
             for item in body.steps
         ]
@@ -258,6 +271,12 @@ async def approve_step(run_uid: str, seq: int, session: SessionDep, actor: Actor
     settings = get_settings()
     spec = load_tools().get(str(step["tool"]))
     args = step.get("args") or {}
+    # 参数里的 `$ref` 要先解析:金额可能是「上一步查出来的额度」,
+    # 拿占位符去算审批需求,会把一笔小额定金当成「金额未知」从而永远签不够。
+    # 解析不了不是这里该报的错(执行器会给出明确失败原因);
+    # 这边退回「金额未知」,也就是从严 —— 宁可多要一个签字。
+    with contextlib.suppress(PlanError):
+        args = plan_module.resolve(args, await load_step_results(session, run.id))
     # 要几个签字必须和执行器算出同一个数:金额不在参数里时,一样去问工具自己。
     resolved_amount = await resolve_effective_amount(spec, args, actor=run.actor, session=session)
     requirement = policy.approval_requirement(

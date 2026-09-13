@@ -36,7 +36,8 @@ export type RejectTicketRequest = Schemas["RejectTicketRequest"];
 
 export type ToolDescription = Schemas["ToolDescription"];
 export type ToolInvocationResponse = Schemas["ToolInvocationResponse"];
-export type Proposal = Schemas["Proposal"];
+export type Plan = Schemas["Plan"];
+export type PlanStep = Schemas["PlanStep"];
 export type DraftProposalRequest = Schemas["DraftProposalRequest"];
 
 // --- 治理层:执行记录与审计 ---

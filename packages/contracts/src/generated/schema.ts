@@ -275,8 +275,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 生成提议(不执行)
-         * @description 生成提议,但**不执行**。返回里带策略引擎的裁决与理由 —— 提议卡片要能解释自己。
+         * 生成计划(不执行)
+         * @description 生成计划,但**不执行**。每一步都带策略引擎的裁决与理由 —— 提议卡片要能解释自己。
          */
         post: operations["draft_proposal_api_planner_draft_post"];
         delete?: never;
@@ -488,7 +488,7 @@ export interface components {
             steps?: components["schemas"]["PlannedStepIn"][];
             /**
              * From Intent
-             * @description 忽略 steps,由规划器从 goal 生成一步计划(规则或 LLM,见 PLANNER_BACKEND)
+             * @description 忽略 steps,由规划器从 goal 生成计划(一步或多步,规则或 LLM,见 PLANNER_BACKEND)
              * @default false
              */
             from_intent: boolean;
@@ -626,27 +626,55 @@ export interface components {
             /** Cancel Reason */
             cancel_reason?: string | null;
         };
-        /** PlannedStepIn */
-        PlannedStepIn: {
-            /** Seq */
-            seq: number;
-            /** Tool */
-            tool: string;
-            /** Args */
-            args?: {
-                [key: string]: unknown;
-            };
+        /**
+         * Plan
+         * @description 一次执行的完整计划。落库之后就是 `agent_run.plan`,执行器按 seq 顺序推进。
+         */
+        Plan: {
             /**
-             * Requires Approval
-             * @default false
+             * Goal
+             * @description 这次执行要达成什么,用人话说
              */
-            requires_approval: boolean;
+            goal: string;
+            /**
+             * Steps
+             * @description 至少一步
+             */
+            steps: components["schemas"]["PlanStep"][];
+            /**
+             * Rationale
+             * @description 为什么这么编排,给审批人看
+             * @default
+             */
+            rationale: string;
+            /**
+             * Evidence
+             * @description 依据的事实
+             */
+            evidence?: string[];
+            /**
+             * Confidence
+             * @default 0.8
+             */
+            confidence: number;
+            /**
+             * Planner
+             * @description 这份计划出自哪条链路
+             * @default deterministic
+             * @enum {string}
+             */
+            planner: "deterministic" | "llm" | "manual";
         };
         /**
-         * Proposal
-         * @description 一条可校验、可展示、可审批的提议。
+         * PlanStep
+         * @description 计划里的一步。校验规则见 `governance.plan.validate`。
          */
-        Proposal: {
+        PlanStep: {
+            /**
+             * Seq
+             * @description 步骤号,从 1 开始;执行顺序就是 seq 顺序
+             */
+            seq: number;
             /**
              * Action
              * @description 要调用的工具名,必须在工具清单内
@@ -654,11 +682,16 @@ export interface components {
             action: string;
             /**
              * Arguments
-             * @description 工具入参,必须满足该工具的 JSON Schema
+             * @description 工具入参,必须满足该工具的 JSON Schema;可以用 {"$ref": "1.ticket_id"} 引用更早步骤的产出
              */
             arguments: {
                 [key: string]: unknown;
             };
+            /**
+             * Depends On
+             * @description 必须等哪些步骤成功;只能指向更早的步骤
+             */
+            depends_on?: number[];
             /**
              * Rationale
              * @description 为什么这么做,给审批人看
@@ -671,7 +704,8 @@ export interface components {
             evidence?: string[];
             /**
              * Confidence
-             * @description 规划器对这条提议的把握程度
+             * @description 规划器对这一步的把握程度
+             * @default 0.8
              */
             confidence: number;
             /**
@@ -687,13 +721,6 @@ export interface components {
              */
             requires_approval: boolean;
             /**
-             * Planner
-             * @description 这条提议出自哪条规划链路
-             * @default deterministic
-             * @enum {string}
-             */
-            planner: "deterministic" | "llm";
-            /**
              * Policy Decision
              * @description 策略引擎裁决:ALLOW / REQUIRE_APPROVAL
              * @default
@@ -705,6 +732,27 @@ export interface components {
              * @default
              */
             policy_reason: string;
+        };
+        /** PlannedStepIn */
+        PlannedStepIn: {
+            /** Seq */
+            seq: number;
+            /** Tool */
+            tool: string;
+            /** Args */
+            args?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Requires Approval
+             * @default false
+             */
+            requires_approval: boolean;
+            /**
+             * Depends On
+             * @description 必须等哪些更早的步骤成功;参数里可以用 $ref 取它们的产出
+             */
+            depends_on?: number[];
         };
         /** ReadyResponse */
         ReadyResponse: {
@@ -1491,7 +1539,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Proposal"];
+                    "application/json": components["schemas"]["Plan"];
                 };
             };
             /** @description Validation Error */

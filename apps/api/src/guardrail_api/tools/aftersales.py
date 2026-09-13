@@ -34,6 +34,25 @@ class RefundTicketView(BaseModel):
     note: str
 
 
+class QueryRefundableParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: int = Field(ge=1, description="要查询的订单 ID")
+
+
+class RefundableView(BaseModel):
+    """一张订单此刻的退款额度账。**只读**,但它经常是多步计划的第 1 步:
+    后面的退款金额要引用这里的 available_refund_cents,而不是让写操作自己去猜。"""
+
+    order_id: int
+    order_no: str
+    status: str
+    total_amount_cents: int
+    refunded_cents: int
+    pending_refund_cents: int
+    available_refund_cents: int
+
+
 class CloseTicketParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -155,6 +174,33 @@ async def create_refund(context: ToolContext, params: CreateRefundParams) -> Ref
             f"已创建待审批退款工单 {ticket.ticket_no},金额 {ticket.refund_amount_cents} 分。"
             "审批通过后才会实际退款。"
         ),
+    )
+
+
+@register(
+    name="query_refundable",
+    title="查询可退额度",
+    description=(
+        "查一张订单此刻还能退多少钱:订单总额、已退金额、审批中占用的额度、剩余可退额度。"
+        "只读,不产生任何副作用。需要按可退额度退款时,先用它把金额查出来。"
+    ),
+    risk_level=RiskLevel.READ_ONLY,
+    params_model=QueryRefundableParams,
+    result_model=RefundableView,
+    tags=("aftersales", "read", "money"),
+)
+async def query_refundable(context: ToolContext, params: QueryRefundableParams) -> RefundableView:
+    order = await load_order(context, params.order_id, None)
+    refunded = await aftersales.refunded_cents(context.session, order.id)
+    pending = await aftersales.pending_refund_cents(context.session, order.id)
+    return RefundableView(
+        order_id=order.id,
+        order_no=order.order_no,
+        status=order.status.value,
+        total_amount_cents=order.total_amount_cents,
+        refunded_cents=refunded,
+        pending_refund_cents=pending,
+        available_refund_cents=order.total_amount_cents - refunded - pending,
     )
 
 

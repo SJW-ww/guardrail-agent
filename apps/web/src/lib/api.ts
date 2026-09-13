@@ -6,7 +6,7 @@ import type {
   OrderListResponse,
   OrderStatus,
   OrderView,
-  Proposal,
+  Plan,
   ReadyResponse,
   RejectTicketRequest,
   RetryStepResponse,
@@ -142,7 +142,7 @@ export const invokeTool = (toolName: string, args: Record<string, unknown>, acto
   });
 
 export const draftProposal = (intent: string) =>
-  request<Proposal>("/api/planner/draft", { method: "POST", body: { intent } });
+  request<Plan>("/api/planner/draft", { method: "POST", body: { intent } });
 
 // --- 治理层:执行记录与审计 ---
 
@@ -150,6 +150,21 @@ export const listRuns = (params: { status?: RunStatus; limit?: number; offset?: 
   request<RunListResponse>(`/api/runs${query(params)}`);
 
 export const getRun = (runUid: string) => request<RunDetail>(`/api/runs/${runUid}`);
+
+/**
+ * 登记一次执行(此时无副作用)。计划里的每一步都带上 seq / 依赖 / 参数,
+ * 参数里的 `{"$ref": "1.x"}` 由后端在执行前解析 —— 前端原样提交,不做二次解释。
+ */
+export const createRun = (body: {
+  goal: string;
+  steps: { seq: number; tool: string; args: Record<string, unknown>; requires_approval?: boolean; depends_on?: number[] }[];
+  actor?: string;
+}) =>
+  request<RunDetail>("/api/runs", {
+    method: "POST",
+    body: { goal: body.goal, steps: body.steps },
+    actor: body.actor,
+  });
 
 export const executeRun = (runUid: string) =>
   request<ExecuteRunResponse>(`/api/runs/${runUid}/execute`, { method: "POST" });

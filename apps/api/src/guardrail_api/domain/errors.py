@@ -53,6 +53,16 @@ class RunBudgetExceeded(DomainError):
     code = "run_budget_exceeded"
 
 
+class PlanError(RuleViolation):
+    """计划本身不合法(步骤号乱序、依赖指向不存在的步骤、引用路径写错)。
+
+    和「执行失败」是两回事:计划不合法就不该产生 run,
+    所以它发生在登记阶段,而不是跑了一半才炸。
+    """
+
+    code = "invalid_plan"
+
+
 class PlannerUnavailable(DomainError):
     """规划器不可用(模型服务超时 / 没配凭据)。
 

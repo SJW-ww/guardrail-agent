@@ -72,8 +72,9 @@ test("提议 → 策略拦下 → 审批 → 执行 → 退款 全链路", async
 
   const proposal = page.locator("article", { hasText: "提议卡片" });
   await expect(proposal).toBeVisible();
-  await expect(proposal.getByText("create_refund", { exact: true })).toBeVisible();
-  await expect(proposal.getByText("需人工审批", { exact: true })).toBeVisible();
+  // 计划卡片 + 步骤卡片上都会标出来,取第一个即可
+  await expect(proposal.getByText("create_refund", { exact: true }).first()).toBeVisible();
+  await expect(proposal.getByText("需人工审批", { exact: true }).first()).toBeVisible();
   await expect(proposal.getByText(/策略裁决 REQUIRE_APPROVAL/)).toBeVisible();
   await expect(proposal.getByText(/质量问题/)).toBeVisible();
   await expect(proposal.getByText("¥1.00")).toBeVisible();
@@ -190,4 +191,43 @@ test("大额退款要两个不同身份签字,签够之前业务表一行不动"
   const pending = (await created.json()) as { items: TicketSummary[] };
   const ticket = pending.items.find((item) => item.order_id === target.order_id);
   expect(ticket, "两个人都签完之后才允许写业务表").toBeTruthy();
+});
+
+test("多步计划:先查可退额度,再按查到的金额退款", async ({ page, request }) => {
+  const ordersResponse = await request.get(`${API}/api/orders?status=PAID&limit=100`);
+  const orders = (await ordersResponse.json()) as { items: OrderSummary[] };
+  const ticketsResponse = await request.get(`${API}/api/tickets?limit=100`);
+  const tickets = (await ticketsResponse.json()) as { items: TicketSummary[] };
+  const touched = new Set(tickets.items.map((ticket) => ticket.order_id));
+  // 挑一张小额订单:这一版重点是"多步 + 引用",不是双人复核(那有单独的用例)
+  const order = orders.items.find(
+    (item) => !touched.has(item.order_id) && item.total_amount_cents < 10_000,
+  );
+  expect(order, "需要一张小额已支付订单,请先执行 make seed-reset").toBeTruthy();
+  const target = order as OrderSummary;
+
+  await page.goto("/console");
+  await page.getByLabel("你想做什么").fill(`订单 ${target.order_no} 质量有问题,帮我退全款`);
+  await page.getByRole("button", { name: "生成提议" }).click();
+
+  const proposal = page.locator("article", { hasText: "提议卡片" });
+  await expect(proposal).toBeVisible();
+  await expect(proposal.getByText("2 步计划")).toBeVisible();
+  await expect(proposal.getByText("query_refundable", { exact: true }).first()).toBeVisible();
+  await expect(proposal.getByText("依赖第 1 步")).toBeVisible();
+  // 第二步的金额是引用,不是编出来的数字 —— 页面上要看得出来
+  await expect(proposal.getByText("← 上游步骤的产出")).toBeVisible();
+
+  await submitProposalAndApproveRun(page);
+
+  // 两步都要跑完,而且退款金额来自第一步查到的可退额度
+  const created = await request.get(`${API}/api/tickets?status=PENDING&limit=100`);
+  const pending = (await created.json()) as {
+    items: { order_id: number; refund_amount_cents: number }[];
+  };
+  const ticket = pending.items.find((item) => item.order_id === target.order_id);
+  expect(ticket, "整份计划跑完之后才该落工单").toBeTruthy();
+  expect((ticket as { refund_amount_cents: number }).refund_amount_cents).toBe(
+    target.total_amount_cents,
+  );
 });

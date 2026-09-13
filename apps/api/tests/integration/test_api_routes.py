@@ -114,7 +114,13 @@ async def test_tools_endpoint_exposes_declarations(api_client: AsyncClient) -> N
 
     assert response.status_code == 200
     tools = {item["name"]: item for item in response.json()}
-    assert set(tools) == {"query_order", "query_logistics", "create_refund", "close_ticket"}
+    assert set(tools) == {
+        "query_order",
+        "query_logistics",
+        "query_refundable",
+        "create_refund",
+        "close_ticket",
+    }
     assert tools["create_refund"]["risk_level"] == "high"
     assert tools["create_refund"]["compensate_tool"] == "close_ticket"
     assert tools["create_refund"]["parameters"]["properties"]["reason_code"]["enum"]
@@ -257,17 +263,44 @@ async def test_planner_draft_returns_structured_proposal(
     )
 
     assert response.status_code == 200, response.text
-    proposal = response.json()
-    assert proposal["action"] == "create_refund"
-    assert proposal["arguments"]["reason_code"] == "QUALITY_ISSUE"
-    assert proposal["arguments"]["amount_cents"] == 8000
-    assert proposal["risk_level"] == "high"
+    plan = response.json()
+    assert plan["goal"]
+    assert len(plan["steps"]) == 1
+    step = plan["steps"][0]
+    assert step["seq"] == 1
+    assert step["action"] == "create_refund"
+    assert step["arguments"]["reason_code"] == "QUALITY_ISSUE"
+    assert step["arguments"]["amount_cents"] == 8000
+    assert step["risk_level"] == "high"
     # 审批不再是规划器自己拍的:它转述策略引擎的裁决。
     # 默认 actor 的信任等级是 L2,高风险退款在 L2 档必须人批。
-    assert proposal["requires_approval"] is True
-    assert proposal["policy_decision"] == "REQUIRE_APPROVAL"
-    assert "L2" in proposal["policy_reason"]
-    assert proposal["evidence"]
+    assert step["requires_approval"] is True
+    assert step["policy_decision"] == "REQUIRE_APPROVAL"
+    assert "L2" in step["policy_reason"]
+    assert step["evidence"]
+
+
+async def test_planner_splits_a_full_refund_into_two_steps(
+    session: AsyncSession, api_client: AsyncClient
+) -> None:
+    """「退全款」不是一步:先查可退额度,再拿着查到的数字去申请 —— 金额要写进计划里。"""
+    await _seed_order(session)
+
+    response = await api_client.post(
+        "/api/planner/draft",
+        json={"intent": "订单 SO2026000001 质量有问题,帮我退全款"},
+    )
+
+    assert response.status_code == 200, response.text
+    plan = response.json()
+    assert [step["action"] for step in plan["steps"]] == ["query_refundable", "create_refund"]
+    first, second = plan["steps"]
+    assert second["depends_on"] == [1]
+    assert second["arguments"]["amount_cents"] == {"$ref": "1.available_refund_cents"}
+    # 金额还没解析出来,但风险等级与裁决已经能算:策略引擎按工具声明定档
+    assert second["risk_level"] == "high"
+    assert first["risk_level"] == "read_only"
+    assert first["policy_decision"] == "ALLOW"
 
 
 async def test_planner_draft_rejects_unrecognized_intent(api_client: AsyncClient) -> None:

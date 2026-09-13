@@ -1,6 +1,9 @@
-"""规划层:把人的意图变成结构化提议。
+"""规划层:把人的意图变成结构化**计划**。
 
-两条链路,同一个出口(`Proposal`),下游完全不需要知道这条提议是谁生成的:
+一份计划 = 一到多步。两步之间可以有先后依赖,也可以传数据
+(`{"$ref": "1.total_amount_cents"}`)。校验与解析在 `governance.plan`。
+
+两条链路,同一个出口(`Plan`),下游完全不需要知道这份计划是谁生成的:
 
 - `deterministic`  规则解析,离线可跑,CI 默认走这条;
 - `llm`            OpenAI 兼容模型,由 `PLANNER_BACKEND` 切换。
@@ -15,9 +18,9 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from guardrail_api.config import get_settings
-from guardrail_api.planner.proposal import Proposal
+from guardrail_api.planner.proposal import Plan, PlanStep
 
-__all__ = ["Proposal", "draft", "planner_backend"]
+__all__ = ["Plan", "PlanStep", "draft", "planner_backend"]
 
 
 def planner_backend() -> Literal["deterministic", "llm"]:
@@ -26,10 +29,10 @@ def planner_backend() -> Literal["deterministic", "llm"]:
     return "llm" if settings.llm_configured else "deterministic"
 
 
-async def draft(session: AsyncSession, intent: str, *, actor: str) -> Proposal:
-    """把一句自然语言变成一条可校验、可展示、可审批的提议。
+async def draft(session: AsyncSession, intent: str, *, actor: str) -> Plan:
+    """把一句自然语言变成一份可校验、可展示、可审批的计划。
 
-    `actor` 不可省略:提议的执行档由执行体的信任等级决定,
+    `actor` 不可省略:计划的执行档由执行体的信任等级决定,
     让调用方「忘了传」等于给了一条默认放行的后门。
     """
     if planner_backend() == "llm":

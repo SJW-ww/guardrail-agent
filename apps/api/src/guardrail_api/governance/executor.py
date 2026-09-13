@@ -28,8 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from guardrail_api.config import Settings, get_settings
 from guardrail_api.domain.clock import utcnow
-from guardrail_api.domain.errors import DomainError, LeaseLost, RunBudgetExceeded
+from guardrail_api.domain.errors import DomainError, LeaseLost, PlanError, RunBudgetExceeded
 from guardrail_api.governance import audit, idempotency, lease, policy
+from guardrail_api.governance import plan as plan_module
 from guardrail_api.governance.policy import PolicyDecision, PolicyVerdict
 from guardrail_api.models import (
     AgentRun,
@@ -55,13 +56,19 @@ CHAOS_AFTER_TOOL_WRITE = "after_tool_write"
 
 @dataclass(frozen=True, slots=True)
 class PlannedStep:
-    """计划里的一步。刻意只用 JSON 可表达的结构,方便整条计划落库与回放。"""
+    """计划里的一步。刻意只用 JSON 可表达的结构,方便整条计划落库与回放。
+
+    `depends_on` 声明「这一步必须等哪些步骤成功」;`args` 里可以写
+    `{"$ref": "1.ticket_id"}` 引用前面步骤的产出。两条规则都由
+    `governance.plan` 在登记时校验、在推进时解析。
+    """
 
     seq: int
     tool: str
     args: dict[str, Any]
     requires_approval: bool = False
     kind: StepKind = StepKind.EXECUTE
+    depends_on: tuple[int, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PlannedStep":
@@ -71,6 +78,7 @@ class PlannedStep:
             args=dict(raw.get("args") or {}),
             requires_approval=bool(raw.get("requires_approval", False)),
             kind=StepKind(raw.get("kind", StepKind.EXECUTE.value)),
+            depends_on=tuple(int(item) for item in raw.get("depends_on") or ()),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -80,7 +88,19 @@ class PlannedStep:
             "args": self.args,
             "requires_approval": self.requires_approval,
             "kind": self.kind.value,
+            "depends_on": list(self.depends_on),
         }
+
+    def with_args(self, args: dict[str, Any]) -> "PlannedStep":
+        """换掉参数,其余不变 —— 解析完引用之后仍然是一个完整的步骤。"""
+        return PlannedStep(
+            seq=self.seq,
+            tool=self.tool,
+            args=args,
+            requires_approval=self.requires_approval,
+            kind=self.kind,
+            depends_on=self.depends_on,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +149,9 @@ async def create_run(
     token_budget: int = 8000,
 ) -> AgentRun:
     """登记一次执行。此时还没有任何副作用 —— 只是把「打算做什么」写下来。"""
-    seqs = [step.seq for step in plan]
-    if len(set(seqs)) != len(seqs):
-        raise ValueError(f"计划里的 seq 必须唯一:{seqs}")
+    # 计划不合法就不该产生 run:步骤号乱序、依赖指向不存在的步骤、引用写错路径,
+    # 全部在这里挡住 —— 而不是跑了两步才发现第三步依赖的东西永远不会来。
+    plan_module.validate(plan, registry=load_tools())
 
     run = AgentRun(
         run_uid=str(uuid.uuid4()),
@@ -239,6 +259,9 @@ class RunExecutor:
                 if not status.is_terminal and run.lease_owner != self.worker_id:
                     raise LeaseLost(f"run {run_uid} 的租约已被 {run.lease_owner} 接管,停止推进")
                 completed = await self._completed_seqs(run.id)
+                # 上游步骤的产出。引用参数靠它解析 —— 从 agent_step.result 里读,
+                # 所以崩溃重启、换一个 worker 接着跑,引用照样能取到值。
+                step_results = await self._completed_results(run.id)
                 # 已收集到的签名,按步骤号。够不够要看策略要求的签名人数,这里只取事实。
                 signatures = {int(seq): list(names) for seq, names in (run.approvals or {}).items()}
                 step_budget = run.step_budget
@@ -264,6 +287,27 @@ class RunExecutor:
                 raise RunBudgetExceeded(message, run_uid=run_uid, step_budget=step_budget)
 
             step = remaining[0]
+
+            # 依赖与引用一起在这里落地:依赖没成功就不许往下走,
+            # 引用的值从上游产出里取。两者都必须发生在**裁决之前** ——
+            # 金额、风险等级、幂等键全都读参数,拿占位符去裁决等于在评一个假的操作。
+            try:
+                _assert_deps_done(step, completed)
+            except PlanError as exc:
+                await self._record_failure(run_uid, step, exc.message, retryable=False)
+                await self._finish(run_uid, RunStatus.FAILED, error=exc.message)
+                result.status = RunStatus.FAILED
+                return
+
+            try:
+                step = step.with_args(plan_module.resolve(step.args, step_results))
+            except PlanError as exc:
+                message = f"第 {step.seq} 步的参数引用解析失败:{exc.message}"
+                await self._record_failure(run_uid, step, message, retryable=False)
+                await self._finish(run_uid, RunStatus.FAILED, error=message)
+                result.status = RunStatus.FAILED
+                return
+
             spec = self.registry.get(step.tool)
             resolved_amount = await self._resolve_amount(spec, step, actor)
             verdict = self._judge(step, actor=actor, resolved_amount=resolved_amount)
@@ -316,6 +360,16 @@ class RunExecutor:
         并发重试之所以安全,靠的是幂等账本而不是互斥锁。
         """
         step = await self._planned_step(run_uid, seq)
+
+        # 重试也要看依赖:第 1 步没成功就重试第 2 步,重试出来的结果没有意义 ——
+        # 「人工点一下」不是绕过编排规则的通行证。
+        async with self._sessions() as session:
+            run = await self._load(session, run_uid)
+            completed = await self._completed_seqs_in(session, run.id)
+            step_results = await self._completed_results_in(session, run.id)
+        _assert_deps_done(step, completed)
+        step = step.with_args(plan_module.resolve(step.args, step_results))
+
         spec = self.registry.get(step.tool)
 
         # 人工重试本身视为对该步的确认,所以不再要求走一次审批;
@@ -737,6 +791,17 @@ class RunExecutor:
         )
         return set(rows.scalars().all())
 
+    async def _completed_results(self, run_id: int) -> dict[int, dict[str, Any]]:
+        """已成功步骤的产出,按步骤号。参数引用从这里取值。"""
+        async with self._sessions() as session:
+            return await self._completed_results_in(session, run_id)
+
+    @staticmethod
+    async def _completed_results_in(
+        session: AsyncSession, run_id: int
+    ) -> dict[int, dict[str, Any]]:
+        return await load_step_results(session, run_id)
+
     async def _heartbeat_loop(self, run_uid: str, heartbeat: _Heartbeat) -> None:
         while True:
             await asyncio.sleep(self.heartbeat_interval)
@@ -761,6 +826,39 @@ class RunExecutor:
     def _chaos(self, event: str, seq: int) -> None:
         if self.chaos is not None:
             self.chaos(event, seq)
+
+
+async def load_step_results(session: AsyncSession, run_id: int) -> dict[int, dict[str, Any]]:
+    """已成功步骤的产出,按步骤号。参数里的 `$ref` 从这里取值。
+
+    放在模块级而不是 executor 的方法里,是因为**审批路由**也要用它:
+    审批门要算「金额多大、要几个人签字」,而金额可能是个引用占位符 ——
+    拿占位符去算,一笔小额定金会被当成"金额未知",于是永远签不够。
+    """
+    rows = await session.execute(
+        select(AgentStep.seq, AgentStep.result).where(
+            AgentStep.run_id == run_id, AgentStep.status == StepStatus.SUCCEEDED
+        )
+    )
+    return {int(seq): dict(result or {}) for seq, result in rows.all()}
+
+
+def _assert_deps_done(step: PlannedStep, completed: set[int]) -> None:
+    """前置步骤没成功就不许执行这一步。
+
+    依赖只能指向更早的步骤,而执行顺序就是 seq 顺序,所以走到这一步时,
+    依赖要么已经成功,要么永远不会成功 —— 不存在"再等等"的中间态。
+    失败要说得具体:**哪一步、依赖谁**,而不是一句"前置条件不满足"。
+    """
+    missing = sorted(dep for dep in step.depends_on if dep not in completed)
+    if missing:
+        raise PlanError(
+            f"第 {step.seq} 步依赖第 {missing} 步,但那些步骤没有成功;"
+            "拒绝执行 —— 前置没做完就往下走,后面每一步都是错的",
+            seq=step.seq,
+            missing=missing,
+            dependency=True,
+        )
 
 
 def _policy_reason(verdict: PolicyVerdict, approvers: list[str]) -> str:

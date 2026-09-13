@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from guardrail_api.config import Settings
 from guardrail_api.domain.clock import utcnow
+from guardrail_api.domain.errors import PlanError
 from guardrail_api.governance import lease
 from guardrail_api.governance.audit_ddl import AUDIT_GUARD_UPGRADE
 from guardrail_api.governance.executor import PlannedStep, RunExecutor, create_run
@@ -558,3 +559,133 @@ async def test_retry_cannot_open_a_denied_step(session: AsyncSession, factory) -
     assert outcome.status is StepStatus.FAILED
     assert "策略引擎拒绝执行" in (outcome.error or "")
     assert await _ticket_count(session, order.id) == 0
+
+
+# ---------- 多步编排:顺序依赖 + 参数引用 ----------
+
+
+def _query_step(seq: int, order_id: int, **kwargs) -> PlannedStep:
+    return PlannedStep(seq=seq, tool="query_order", args={"order_id": order_id}, **kwargs)
+
+
+async def test_step_output_feeds_the_next_step(session: AsyncSession, factory) -> None:
+    """第二步的金额来自第一步的产出 —— 编排的意义就是把上一步的结果用起来。
+
+    这里真正值钱的不是「能引用」,而是**引用发生在裁决之前**:
+    策略引擎看到的是一笔 20000 分的退款(额度正好卡在 L4 上限),而不是一个占位符。
+    """
+    order = await _paid_order(session, order_no="SO2026006001")
+    total_cents = order.total_amount_cents
+    await session.commit()
+    run_uid = await _seed_run(
+        session,
+        plan=[
+            _query_step(1, order.id),
+            PlannedStep(
+                seq=2,
+                tool="create_refund",
+                args={
+                    "order_id": order.id,
+                    "reason_code": "QUALITY_ISSUE",
+                    "amount_cents": {"$ref": "1.total_amount_cents"},
+                },
+                depends_on=(1,),
+            ),
+        ],
+    )
+
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    result = await executor.execute_run(run_uid)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert [outcome.seq for outcome in result.outcomes] == [1, 2]
+
+    session.expire_all()
+    tickets = (await session.execute(select(AftersalesTicket))).scalars().all()
+    assert [ticket.refund_amount_cents for ticket in tickets] == [total_cents]
+
+    # 审计里记的必须是解析后的真实参数,不能是 {"$ref": ...} 这种占位符 ——
+    # 否则事后复盘根本看不出这次到底动了多少钱。
+    entries = (await session.execute(select(AuditLog))).scalars().all()
+    assert len(entries) == 1, "只读步骤不产生审计行"
+    assert entries[0].args["amount_cents"] == total_cents
+
+
+async def test_broken_reference_fails_the_run_before_writing(
+    session: AsyncSession, factory
+) -> None:
+    """引用写错路径:整条 run 明确失败,而不是把占位符塞给工具或者默默传个 None。"""
+    order = await _paid_order(session, order_no="SO2026006002")
+    order_id = order.id
+    await session.commit()
+    run_uid = await _seed_run(
+        session,
+        plan=[
+            _query_step(1, order.id),
+            PlannedStep(
+                seq=2,
+                tool="create_refund",
+                args={
+                    "order_id": order.id,
+                    "reason_code": "QUALITY_ISSUE",
+                    "amount_cents": {"$ref": "1.nope"},
+                },
+                depends_on=(1,),
+            ),
+        ],
+    )
+
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    result = await executor.execute_run(run_uid)
+
+    assert result.status is RunStatus.FAILED
+    session.expire_all()
+    run = await _run_of(session, run_uid)
+    assert "引用取值失败" in (run.last_error or "")
+    assert await _ticket_count(session, order_id) == 0
+
+
+async def test_a_failing_step_stops_the_plan_there(session: AsyncSession, factory) -> None:
+    """第一步失败,第二步连试都不该试 —— 前置没做完就往下走,后面每一步都是错的。"""
+    order = await _paid_order(session, order_no="SO2026006003")
+    await session.commit()
+    run_uid = await _seed_run(
+        session,
+        plan=[
+            _query_step(1, 999_999),  # 不存在的订单 → 工具必然失败
+            _query_step(2, order.id, depends_on=(1,)),
+        ],
+    )
+
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    result = await executor.execute_run(run_uid)
+
+    assert result.status is RunStatus.FAILED
+    assert [outcome.seq for outcome in result.outcomes] == [1], "第二步不该被执行"
+
+
+async def test_retrying_a_step_before_its_dependency_succeeded_is_refused(
+    session: AsyncSession, factory
+) -> None:
+    """人工重试也要守编排规则:前置没成功,重试第 2 步没有意义。"""
+    order = await _paid_order(session, order_no="SO2026006004")
+    await session.commit()
+    run_uid = await _seed_run(
+        session,
+        plan=[
+            _query_step(1, 999_999),  # 不存在的订单 → 工具必然失败
+            _query_step(2, order.id, depends_on=(1,)),
+        ],
+    )
+
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    await executor.execute_run(run_uid)
+
+    with pytest.raises(PlanError) as excinfo:
+        await executor.retry_step(run_uid, 2)
+
+    assert "依赖第 [1] 步" in excinfo.value.message
