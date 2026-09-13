@@ -275,3 +275,88 @@ async def test_planner_draft_rejects_unrecognized_intent(api_client: AsyncClient
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "rule_violation"
+
+
+async def _invoke_refund_run(api_client: AsyncClient, order_id: int, actor: str) -> str:
+    """在网关提交一次退款,返回需要审批的 run_uid。"""
+    response = await api_client.post(
+        "/api/tools/create_refund/invoke",
+        json={"arguments": {"order_id": order_id, "reason_code": "QUALITY_ISSUE"}},
+        headers={"X-Actor": actor},
+    )
+    assert response.status_code == 202, response.text
+    return response.json()["run_uid"]
+
+
+async def test_approving_a_step_records_who_signed(
+    session: AsyncSession, api_client: AsyncClient
+) -> None:
+    """批准要记名。只有"被批过"没有"谁批的",复盘时责任落不到人头上。"""
+    order = await _seed_order(session)
+    await api_client.post(f"/api/orders/{order.id}/pay")
+    run_uid = await _invoke_refund_run(api_client, order.id, "operator-07")
+
+    response = await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-01"}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["approvals"] == {"1": "human:supervisor-01"}
+    assert body["approved_seqs"] == [1], "兼容字段由 approvals 派生,不会漂移"
+
+
+async def test_self_approval_is_rejected(session: AsyncSession, api_client: AsyncClient) -> None:
+    """发起执行的人不能自己批自己 —— 否则审批这道闸门形同虚设。"""
+    order = await _seed_order(session)
+    await api_client.post(f"/api/orders/{order.id}/pay")
+    run_uid = await _invoke_refund_run(api_client, order.id, "operator-07")
+
+    response = await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "operator-07"}
+    )
+
+    assert response.status_code == 403, response.text
+    error = response.json()["error"]
+    assert error["code"] == "policy_denied"
+    assert error["context"]["rule"] == "approval_self"
+
+    # 被拒的审批不能留下任何痕迹:run 还在等审批
+    detail = (await api_client.get(f"/api/runs/{run_uid}")).json()
+    assert detail["status"] == "WAITING_APPROVAL"
+    assert detail["approvals"] == {}
+
+
+async def test_machine_cannot_approve_by_default(
+    session: AsyncSession, api_client: AsyncClient
+) -> None:
+    """机器执行体不能替人签字:没人因此负责。"""
+    order = await _seed_order(session)
+    await api_client.post(f"/api/orders/{order.id}/pay")
+    run_uid = await _invoke_refund_run(api_client, order.id, "operator-07")
+
+    response = await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "agent:refund-bot"}
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["context"]["rule"] == "approval_by_machine"
+
+
+async def test_second_approval_keeps_the_first_signature(
+    session: AsyncSession, api_client: AsyncClient
+) -> None:
+    """重复批准不覆盖签名:谁先愿意负责,就是谁的责任。"""
+    order = await _seed_order(session)
+    await api_client.post(f"/api/orders/{order.id}/pay")
+    run_uid = await _invoke_refund_run(api_client, order.id, "operator-07")
+
+    await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-01"}
+    )
+    again = await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-02"}
+    )
+
+    assert again.status_code == 200
+    assert again.json()["approvals"] == {"1": "human:supervisor-01"}

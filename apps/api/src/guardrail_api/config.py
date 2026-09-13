@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     policy_actor_trust_levels: str = ""
     # 只有 L4 用得上:高风险工具在「幂等 + 可补偿 + 未超此额度」时可以自动执行
     policy_l4_high_risk_limit_cents: int = 20000
+    # 是否允许机器执行体(agent: 前缀)批准人工审批步骤。
+    # 默认不允许:让机器人给自己的同类签字,等于把审批这道闸门拆了。
+    policy_allow_agent_approval: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:

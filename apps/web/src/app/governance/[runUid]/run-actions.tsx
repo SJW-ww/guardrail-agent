@@ -8,6 +8,12 @@ import { ApiErrorNotice } from "@/components/api-error-notice";
 import { approveStep, executeRun, retryStep } from "@/lib/api";
 
 /**
+ * 执行详情页上的审批身份。刻意用一个**不同于发起者**的人:
+ * 后端会拒绝「自己批自己」,所以这个界面本身就演示了职责分离。
+ */
+const APPROVER = "supervisor-01";
+
+/**
  * 推进 / 重试 / 批准。
  *
  * 「重试」是幂等账本的价值兑现点:重试一个已经成功过的步骤不会让副作用发生第二次,
@@ -64,10 +70,10 @@ export function RunActions({
           <button
             type="button"
             disabled={busy !== null}
-            onClick={() => run("approve", () => approveStep(runUid, waitingSeq))}
+            onClick={() => run("approve", () => approveStep(runUid, waitingSeq, APPROVER))}
             className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
           >
-            {busy === "approve" ? "批准中…" : `批准第 ${waitingSeq} 步`}
+            {busy === "approve" ? "批准中…" : `批准第 ${waitingSeq} 步(以 ${APPROVER} 身份)`}
           </button>
         )}
 

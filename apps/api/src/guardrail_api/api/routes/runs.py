@@ -14,11 +14,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from guardrail_api.api.deps import ActorDep
+from guardrail_api.api.deps import ActorDep, normalize_actor
+from guardrail_api.config import get_settings
 from guardrail_api.db import get_session, get_session_factory
-from guardrail_api.domain.errors import RuleViolation
-from guardrail_api.governance import trace
+from guardrail_api.domain.errors import PolicyDenied, RuleViolation
+from guardrail_api.governance import policy, trace
 from guardrail_api.governance.executor import PlannedStep, RunExecutor, create_run
+from guardrail_api.governance.policy import PolicyDecision
 from guardrail_api.models import AgentRun, AgentStep, RunStatus, StepKind, StepStatus
 from guardrail_api.planner import draft
 
@@ -72,7 +74,11 @@ class RunView(BaseModel):
     checkpoint_seq: int
     checkpoint: dict[str, Any] | None = None
     waiting_ref: str | None = None
+    # 兼容字段:由 approvals 派生。新代码请读 approvals,它才有"谁批的"
     approved_seqs: list[int]
+    approvals: dict[str, str] = Field(
+        default_factory=dict, description="批准记录:{步骤序号: 批准人}"
+    )
     attempt: int
     last_error: str | None = None
     created_at: datetime
@@ -109,6 +115,7 @@ def _to_view(run: AgentRun) -> RunView:
         checkpoint=run.checkpoint,
         waiting_ref=run.waiting_ref,
         approved_seqs=list(run.approved_seqs or []),
+        approvals=dict(run.approvals or {}),
         attempt=run.attempt,
         last_error=run.last_error,
         created_at=run.created_at,
@@ -235,12 +242,31 @@ async def execute_run(run_uid: str, session: SessionDep) -> ExecuteResponse:
 
 @router.post("/{run_uid}/steps/{seq}/approve", response_model=RunDetail, summary="批准挂起的步骤")
 async def approve_step(run_uid: str, seq: int, session: SessionDep, actor: ActorDep) -> RunDetail:
+    """批准一个挂起的步骤。
+
+    批准不是「点一下放行」,它是一次**有人签字**的事件,所以三件事都要做对:
+    谁能批(策略裁决)、批了哪一步(白名单校验)、是谁批的(记名)。
+    """
     run = await _by_uid(session, run_uid)
-    if seq not in [int(step["seq"]) for step in run.plan]:
+    step = next((item for item in run.plan if int(item["seq"]) == seq), None)
+    if step is None:
         raise RuleViolation(f"步骤 {seq} 不在这次执行的计划里")
 
-    approved = sorted({*run.approved_seqs, seq})
-    run.approved_seqs = approved
+    approver = normalize_actor(actor)
+    verdict = policy.evaluate_approval(
+        run_actor=run.actor,
+        approver=approver,
+        tool=str(step["tool"]),
+        settings=get_settings(),
+    )
+    if verdict.decision is not PolicyDecision.ALLOW:
+        raise PolicyDenied(verdict.reason, rule=verdict.rule, run_uid=run_uid, step_seq=seq)
+
+    # 记名,且**不覆盖**:同一个步骤被批第二次时,留下的是第一个签字的人。
+    # 谁先愿意为这次写操作负责,就是谁的责任。
+    approvals = dict(run.approvals or {})
+    approvals.setdefault(str(seq), approver)
+    run.approvals = approvals
     run.waiting_ref = None
     # 审批通过只是「允许继续」,不代表已经执行:状态回到 PENDING,等 worker 或调用方推进
     if run.status is RunStatus.WAITING_APPROVAL:

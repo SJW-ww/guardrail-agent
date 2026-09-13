@@ -459,6 +459,7 @@ async def test_default_level_escalates_high_risk_and_blocks_before_writing(
     assert run.checkpoint["policy"]["rule"] == "high_risk_requires_approval"
     assert "必须人工审批" in run.checkpoint["policy"]["reason"]
     assert run.approved_seqs == []
+    assert run.approvals == {}
 
 
 async def test_approved_step_resumes_and_executes(session: AsyncSession, factory) -> None:
@@ -475,7 +476,9 @@ async def test_approved_step_resumes_and_executes(session: AsyncSession, factory
     session.expire_all()
     run = await _run_of(session, run_uid)
     assert run.lease_owner is None, "等审批时不该占着租约,否则审批通过后没人能推进它"
-    run.approved_seqs = [1]
+    assert run.approvals == {}, "还没人批过"
+    # 批准要记名:留下的是"谁签的字",不是一个孤零零的序号
+    run.approvals = {"1": "supervisor-01"}
     run.status = RunStatus.PENDING
     await session.commit()
 
@@ -486,11 +489,11 @@ async def test_approved_step_resumes_and_executes(session: AsyncSession, factory
     assert result.status is RunStatus.SUCCEEDED
     assert await _ticket_count(session, order_id) == 1
 
-    # 审计不仅要记下"策略要求审批",还要记下"这一步确实是被批过才执行的"
+    # 审计不仅要记下"策略要求审批",还要记下"谁批的" —— 光有"被批过"答不出责任在谁
     session.expire_all()
     entry = (await session.execute(select(AuditLog))).scalar_one()
     assert entry.policy_decision == "REQUIRE_APPROVAL"
-    assert "已获人工批准后执行" in (entry.policy_reason or "")
+    assert "已获 supervisor-01 批准后执行" in (entry.policy_reason or "")
 
 
 async def test_l0_executor_is_denied_and_the_denial_is_audited(

@@ -163,6 +163,53 @@ def evaluate(
     )
 
 
+def evaluate_approval(
+    *,
+    run_actor: str,
+    approver: str,
+    tool: str,
+    settings: Settings,
+) -> PolicyVerdict:
+    """审批本身也要裁决:**谁能批、谁不能批**,同样给理由。
+
+    两条不能少的规则:
+
+    1. **不能自己批自己。** 发起这次执行的执行体再点一次「批准」,那不是审批,
+       是把闸门拆了。职责分离(separation of duties)是最古老也最有效的一条控制。
+    2. **机器不能替人做审批决定。** 审批的意义在于「有个人愿意为这次写操作负责」;
+       一个 agent: 前缀的调用者点批准,没人因此负责。
+
+    注意这两条都只约束「谁」,不约束「批的是哪一步」—— 后者是 evaluate() 的事。
+    """
+    trust, source = resolve_trust_level(approver, settings)
+
+    if approver == run_actor:
+        return PolicyVerdict(
+            decision=PolicyDecision.DENY,
+            rule="approval_self",
+            reason=f"{approver} 是这次执行的发起者,不能批准自己的操作(职责分离)",
+            trust_level=trust,
+        )
+
+    if approver.startswith("agent:") and not settings.policy_allow_agent_approval:
+        return PolicyVerdict(
+            decision=PolicyDecision.DENY,
+            rule="approval_by_machine",
+            reason=(
+                f"{approver} 是机器执行体,默认不能替人做审批决定"
+                "(如需自动化审批,请显式打开 POLICY_ALLOW_AGENT_APPROVAL 并自担风险)"
+            ),
+            trust_level=trust,
+        )
+
+    return PolicyVerdict(
+        decision=PolicyDecision.ALLOW,
+        rule="approval_allowed",
+        reason=f"{approver}({source})批准 {tool} 的执行,责任落到该审批人",
+        trust_level=trust,
+    )
+
+
 def _evaluate_high_risk(
     spec: ToolSpec,
     arguments: Mapping[str, Any],

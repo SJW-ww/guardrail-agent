@@ -346,7 +346,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 批准挂起的步骤 */
+        /**
+         * 批准挂起的步骤
+         * @description 批准一个挂起的步骤。
+         *
+         *     批准不是「点一下放行」,它是一次**有人签字**的事件,所以三件事都要做对:
+         *     谁能批(策略裁决)、批了哪一步(白名单校验)、是谁批的(记名)。
+         */
         post: operations["approve_step_api_runs__run_uid__steps__seq__approve_post"];
         delete?: never;
         options?: never;
@@ -762,6 +768,13 @@ export interface components {
             waiting_ref?: string | null;
             /** Approved Seqs */
             approved_seqs: number[];
+            /**
+             * Approvals
+             * @description 批准记录:{步骤序号: 批准人}
+             */
+            approvals?: {
+                [key: string]: string;
+            };
             /** Attempt */
             attempt: number;
             /** Last Error */
@@ -821,6 +834,13 @@ export interface components {
             waiting_ref?: string | null;
             /** Approved Seqs */
             approved_seqs: number[];
+            /**
+             * Approvals
+             * @description 批准记录:{步骤序号: 批准人}
+             */
+            approvals?: {
+                [key: string]: string;
+            };
             /** Attempt */
             attempt: number;
             /** Last Error */

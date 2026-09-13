@@ -134,7 +134,7 @@ test("UI 点的写操作会进治理链路:审计里能看到 before/after", asy
   await expect(latest.getByText("成功")).toBeVisible();
   // 这一步是策略要求审批、人批了之后才执行的 —— 审计要能读出这两件事
   await expect(latest.getByText(/策略 REQUIRE_APPROVAL/)).toBeVisible();
-  await expect(latest.getByText(/已获人工批准后执行/)).toBeVisible();
+  await expect(latest.getByText(/已获 human:supervisor-01 批准后执行/)).toBeVisible();
   // 订单在 seed 里可能已经有工单,所以新工单的下标不固定;
   // 断言收窄到那一行 diff,避免和「完整快照」里的原文冲突
   const change = latest.locator("li").filter({ hasText: /tickets\[\d+\]\.status/ });

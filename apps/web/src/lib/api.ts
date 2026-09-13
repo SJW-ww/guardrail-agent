@@ -157,8 +157,12 @@ export const executeRun = (runUid: string) =>
 export const retryStep = (runUid: string, seq: number) =>
   request<RetryStepResponse>(`/api/runs/${runUid}/steps/${seq}/retry`, { method: "POST" });
 
-export const approveStep = (runUid: string, seq: number) =>
-  request<RunDetail>(`/api/runs/${runUid}/steps/${seq}/approve`, { method: "POST" });
+/**
+ * 批准一个挂起的步骤。**必须带审批人身份** —— 审计要记下"谁签的字"。
+ * 而且这个身份不能等于发起执行的执行体:系统会拒绝自己批自己(职责分离)。
+ */
+export const approveStep = (runUid: string, seq: number, actor: string) =>
+  request<RunDetail>(`/api/runs/${runUid}/steps/${seq}/approve`, { method: "POST", actor });
 
 export const listAudit = (
   params: { run_uid?: string; trace_id?: string; tool_name?: string; limit?: number } = {},

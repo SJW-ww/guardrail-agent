@@ -1027,6 +1027,7 @@
           "governance"
         ],
         "summary": "批准挂起的步骤",
+        "description": "批准一个挂起的步骤。\n\n批准不是「点一下放行」,它是一次**有人签字**的事件,所以三件事都要做对:\n谁能批(策略裁决)、批了哪一步(白名单校验)、是谁批的(记名)。",
         "operationId": "approve_step_api_runs__run_uid__steps__seq__approve_post",
         "parameters": [
           {
@@ -2157,6 +2158,14 @@
             "type": "array",
             "title": "Approved Seqs"
           },
+          "approvals": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Approvals",
+            "description": "批准记录:{步骤序号: 批准人}"
+          },
           "attempt": {
             "type": "integer",
             "title": "Attempt"
@@ -2319,6 +2328,14 @@
             },
             "type": "array",
             "title": "Approved Seqs"
+          },
+          "approvals": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Approvals",
+            "description": "批准记录:{步骤序号: 批准人}"
           },
           "attempt": {
             "type": "integer",

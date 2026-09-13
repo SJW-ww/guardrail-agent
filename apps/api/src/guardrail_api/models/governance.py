@@ -69,9 +69,11 @@ class AgentRun(TimestampMixin, Base):
 
     # 等审批时挂住的原因(工单号 / 策略理由),恢复时要能原样接着走
     waiting_ref: Mapped[str | None] = mapped_column(String(64))
-    # 人工批准过的 step seq。批准是一次**显式事件**,不能被推断 ——
-    # 推断意味着「模型自己觉得没问题」也能过
-    approved_seqs: Mapped[list[int]] = mapped_column(JSONB, nullable=False, default=list)
+    # 谁批准了哪一步:`{"1": "supervisor-01"}`。批准是一次**显式事件**,不能被推断 ——
+    # 推断意味着「模型自己觉得没问题」也能过。
+    # 只记 seq 是不够的:审计要能回答「谁批的」,所以这里记的是**人和步骤的对应关系**。
+    # 注意它是操作状态而不是不可篡改记录 —— 真正防篡改的那份在 audit_log 行里。
+    approvals: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
     last_error: Mapped[str | None] = mapped_column(Text)
 
     # 预算:W3 接 LLM 后启用,先在表里占位,避免上线时改表
@@ -90,6 +92,15 @@ class AgentRun(TimestampMixin, Base):
     steps: Mapped[list["AgentStep"]] = relationship(
         back_populates="run", order_by="AgentStep.seq", lazy="selectin"
     )
+
+    @property
+    def approved_seqs(self) -> list[int]:
+        """已批准的步骤序号。从 `approvals` 派生,保证只有一个事实来源。"""
+        return sorted(int(seq) for seq in (self.approvals or {}))
+
+    def approver_of(self, seq: int) -> str | None:
+        """这一步是谁批的。没人批过就返回 None。"""
+        return (self.approvals or {}).get(str(seq))
 
     __table_args__ = (Index("ix_agent_run_claimable", "status", "lease_expires_at"),)
 

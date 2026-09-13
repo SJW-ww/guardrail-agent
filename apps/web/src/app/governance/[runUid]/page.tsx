@@ -68,6 +68,19 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
           </section>
         )}
 
+        {Object.entries(run.approvals ?? {}).length > 0 && (
+          <section className="space-y-1 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3">
+            <p className="font-mono text-xs text-neutral-500">审批记录(谁为哪一步签的字)</p>
+            <ul className="space-y-0.5 text-sm text-neutral-300">
+              {Object.entries(run.approvals ?? {}).map(([seq, approver]) => (
+                <li key={seq}>
+                  步骤 #{seq} ← <span className="font-mono">{approver}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         <RunActions
           runUid={run.run_uid}
           status={run.status}

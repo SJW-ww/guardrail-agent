@@ -370,9 +370,9 @@ class RunExecutor:
             try:
                 step_row = await self._open_step(session, run_id=run.id, step=step)
                 context = ToolContext(session=session, actor=run.actor, run_id=run.run_uid)
-                # 这一步是不是「策略要求审批、人批了之后才走到这」。
-                # 不记这一笔的话,审计里只留下一句"必须人工审批",读起来像是被拦住了。
-                approved_by_human = step.seq in set(run.approved_seqs or [])
+                # 这一步是谁批的。不记这一笔的话,审计里只留下一句"必须人工审批",
+                # 读起来像是被拦住了;而且复盘时答不出「谁为这次写操作签的字」。
+                approver = run.approver_of(step.seq)
 
                 claim = None
                 if key is not None:
@@ -414,7 +414,7 @@ class RunExecutor:
                             reason=reason,
                             outcome=AuditOutcome.SUCCEEDED,
                             policy_decision=verdict.decision.value,
-                            policy_reason=_policy_reason(verdict, approved_by_human),
+                            policy_reason=_policy_reason(verdict, approver),
                         )
                     await self._close_step(
                         session, step_row, result=payload, idempotency_key=key, replayed=False
@@ -724,10 +724,10 @@ class RunExecutor:
             self.chaos(event, seq)
 
 
-def _policy_reason(verdict: PolicyVerdict, approved_by_human: bool) -> str:
-    """审计里的裁决理由。人工批准过就补一句 —— 否则读起来像"被拦住了",而它其实执行了。"""
-    if approved_by_human:
-        return f"{verdict.reason};该操作已获人工批准后执行"
+def _policy_reason(verdict: PolicyVerdict, approver: str | None) -> str:
+    """审计里的裁决理由。有人批过就补一句 —— 否则读起来像"被拦住了",而它其实执行了。"""
+    if approver:
+        return f"{verdict.reason};该操作已获 {approver} 批准后执行"
     return verdict.reason
 
 
