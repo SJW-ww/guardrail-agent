@@ -2,6 +2,7 @@
   "name": "guardrail",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Agent 写操作安全执行层 - 让 Agent 从只能读,安全地走到能够改",
   "workspaces": [
     "apps/web",
