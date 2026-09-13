@@ -10,7 +10,7 @@ POSTGRES_PASSWORD ?= guardrail
 POSTGRES_DB ?= guardrail
 TEST_DATABASE_URL ?= postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/guardrail_test
 
-.PHONY: help init up down logs ps restart migrate migrate-local revision seed test-integration api-check api-test api-lint api-fmt web-dev web-check check clean worker demo-governance
+.PHONY: help init up down logs ps restart migrate migrate-local revision seed test-integration api-check api-test api-lint api-fmt web-dev web-check check clean worker demo-governance demo-planner
 
 help:  ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -62,6 +62,11 @@ worker:  ## 常驻执行 worker(治理层唯一有权推进 run 的进程之一)
 
 demo-governance:  ## 演示 W2 三条验收:kill -9 续跑 · 幂等重放 · 审计前后值
 	$(COMPOSE) exec -T api uv run python -m guardrail_api.scripts.demo_governance
+
+demo-planner:  ## 演示 W3:真模型跑规划器(需在 .env 配好 LLM_*,会消耗 token)
+	@test -n "$(LLM_API_KEY)" || (echo "请先在 .env 里配好 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL" && exit 1)
+	$(COMPOSE) exec -T -e PLANNER_BACKEND=llm api \
+		uv run python -m guardrail_api.scripts.demo_planner $(if $(i),-i "$(i)")
 
 api-check: api-lint api-test  ## 后端静态检查 + 测试
 

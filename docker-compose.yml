@@ -62,6 +62,14 @@ services:
       # 补偿(W6):失败之后要不要自动把已经成功的写操作撤回来。
       # auto / manual / off —— 见 .env.example
       COMPENSATION_MODE: ${COMPENSATION_MODE:-auto}
+      # 规划器(W3):默认 deterministic,离线可跑;填了 LLM_API_KEY 才能切 llm。
+      # 演示用 `make demo-planner`,它会临时覆盖 PLANNER_BACKEND,不用改这里的默认值。
+      PLANNER_BACKEND: ${PLANNER_BACKEND:-deterministic}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      LLM_MAX_REPAIR_ATTEMPTS: ${LLM_MAX_REPAIR_ATTEMPTS:-2}
       WATCHFILES_FORCE_POLLING: "true"
     ports:
       - "${API_PORT:-8000}:8000"

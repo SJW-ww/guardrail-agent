@@ -122,6 +122,26 @@ make demo-governance
 3. **裁决每次都留痕。** `audit_log.policy_decision` / `policy_reason` 记下"当时凭什么允许它写";
    等审批的 run 会**交还租约** —— 人思考的时候不该占着执行权。
 
+### 让真模型跑一遍
+
+```bash
+make demo-planner                            # 跑固定的几条意图
+make demo-planner i="把 SO2026000005 退了"   # 临时再加一条
+```
+
+`demo-planner` 让真模型读一句人话、产出一份带裁决的计划,并把**调了几次模型、打回重写几次、
+每一步的裁决与理由**如实打出来;它只调 `planner.draft`,**不登记 run、不产生任何副作用**,
+跑完库里一行都不多。
+
+实测会遇到的两件事,说明"模型只提议"不是一句口号:模型偶尔会在
+`create_refund` 里填一个不合法的金额,被工具 Schema 打回、带着错误原文重写一次才过;
+而"帮我退款"这种没有订单号的意图,**在调模型之前**就被拦下(0 token)——
+订单主键由系统从库里取,不问模型。
+
+CI 走的是 deterministic 规划器(离线、免费);这条命令需要 `.env` 里配好
+`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`,**会消耗 token**,所以不进 CI。
+一步还是多步由模型自己决定,因此演示不写死步数断言 —— 多步引用的正确性由集成测试覆盖。
+
 ### 审批:批了不算完,还要答得出「谁批的」
 
 审批不是「点一下放行」,它是一次**有人签字**的事件。所以三件事都做对:
@@ -282,7 +302,8 @@ run 置成 `RUNNING`,而 `RUNNING` 属于「可被领取」—— 补偿撤到�
 make api-test            # 快速套件:不需要数据库(状态机、配置、路由契约)
 make test-integration    # 集成测试:订单全链路 · 库存行锁 · 幂等 · 续跑 · 租约 · 审计 · 补偿
 make e2e                 # 端到端:提议 → 执行 → 审批 → 退款 + 治理看板 + 失败补偿(需整个栈在跑)
-make demo-governance     # 演示:kill -9 续跑 · 幂等重放 · 审计前后值
+make demo-governance     # 演示 W2:kill -9 续跑 · 幂等重放 · 审计前后值
+make demo-planner        # 演示 W3:真模型跑规划器(需配 LLM_*,会消耗 token,不进 CI)
 make worker              # 常驻执行 worker(可起多个副本验证租约互斥)
 make check               # CI 等价:后端 lint + 测试,前端 typecheck + lint
 ```
