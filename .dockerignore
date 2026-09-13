@@ -1,0 +1,25 @@
+# 构建上下文里绝不该出现的东西(否则 context 轻松几百 MB)
+.git
+.github
+.venv
+**/.venv
+node_modules
+**/node_modules
+.next
+**/.next
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+dist
+out
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+docs
+image.png
+

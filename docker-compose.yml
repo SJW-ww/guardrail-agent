@@ -1,0 +1,102 @@
+name: guardrail
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    mem_limit: 320m
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-guardrail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-guardrail}
+      POSTGRES_DB: ${POSTGRES_DB:-guardrail}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-guardrail} -d ${POSTGRES_DB:-guardrail}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    mem_limit: 160m
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/api.Dockerfile
+      target: dev
+    mem_limit: 640m
+    restart: unless-stopped
+    # 以宿主机 UID 运行,否则容器写出的文件(如 __pycache__)在宿主机上属于 root、删不掉
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      HOME: /tmp
+      UV_CACHE_DIR: /tmp/uv-cache
+      # 源码是挂载进来的、项目以 editable 方式装好,开发时不需要 uv 再同步;
+      # 否则 uv 会尝试改写镜像里的 /opt/venv,而运行身份不是 root。
+      # 改了依赖记得 `docker compose build api`。
+      UV_NO_SYNC: "1"
+      APP_ENV: ${APP_ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: ${DATABASE_URL_IN_DOCKER:-postgresql+asyncpg://guardrail:guardrail@postgres:5432/guardrail}
+      REDIS_URL: ${REDIS_URL_IN_DOCKER:-redis://redis:6379/0}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      LEASE_SECONDS: ${LEASE_SECONDS:-30}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-10}
+      MAX_STEP_RETRIES: ${MAX_STEP_RETRIES:-3}
+      WATCHFILES_FORCE_POLLING: "true"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+      target: dev
+    mem_limit: 1g
+    restart: unless-stopped
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      HOME: /tmp
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://api:8000}
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    volumes:
+      - ./apps/web:/app/apps/web
+      - ./packages/contracts:/app/packages/contracts
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  redisdata:

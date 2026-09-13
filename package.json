@@ -1,0 +1,23 @@
+{
+  "name": "guardrail",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent 写操作安全执行层 - 让 Agent 从只能读,安全地走到能够改",
+  "workspaces": [
+    "apps/web",
+    "packages/contracts"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @guardrail/web",
+    "build": "npm run build -w @guardrail/web",
+    "start": "npm run start -w @guardrail/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "contracts:export": "bash scripts/export-openapi.sh",
+    "contracts:generate": "npm run generate -w @guardrail/contracts",
+    "contracts:check": "npm run contracts:export && git diff --exit-code packages/contracts"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

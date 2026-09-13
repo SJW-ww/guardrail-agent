@@ -1,0 +1,108 @@
+"""工具契约。
+
+**工具声明即护栏。** 参数 Schema、风险级别、前置条件、副作用、幂等策略、补偿动作,
+全部写在 `ToolSpec` 里,而不是散在 handler 内部:
+
+- 编排层(W3 的 Agent)只读这份声明,不需要理解工具实现;
+- 策略引擎(W4)按 `risk_level` 决定 ALLOW / REQUIRE_APPROVAL / DENY;
+- 执行器(W2)按 `idempotency_key` 落幂等表,按 `compensate_tool` 编排补偿。
+
+新增一个工具只需要新增一个声明,编排层与治理层都不改代码。
+"""
+
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class RiskLevel(StrEnum):
+    """工具的风险级别 —— 策略引擎的第一输入。"""
+
+    READ_ONLY = "read_only"
+    LOW = "low"  # 可逆的低风险写:建工单、改地址
+    HIGH = "high"  # 动钱动库存:退款、改价
+
+
+@dataclass(slots=True)
+class ToolContext:
+    """一次工具调用的上下文。agent / human 的身份从认证上下文注入,不由模型提供。"""
+
+    session: AsyncSession
+    actor: str
+    run_id: str | None = None
+    tenant_id: str = "default"
+
+    @property
+    def is_agent(self) -> bool:
+        return self.actor.startswith("agent:")
+
+
+ToolHandler = Callable[[ToolContext, Any], Awaitable[BaseModel]]
+
+# 审计快照:给定参数,返回这次调用**会动到的那部分世界**的当前值。
+# 执行器会在 handler 前后各调一次,差集就是这次写操作的 before / after。
+# 返回结构必须可 JSON 序列化,且只包含被本工具影响的实体 ——
+# 审计表里不该出现和这次操作无关的字段,否则没人看得懂 diff。
+ToolSnapshot = Callable[[ToolContext, Any], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    name: str
+    title: str
+    description: str
+    risk_level: RiskLevel
+    params_model: type[BaseModel]
+    handler: ToolHandler
+    result_model: type[BaseModel] | None = None
+    preconditions: tuple[str, ...] = ()
+    side_effect: str | None = None
+    idempotent: bool = False
+    idempotency_key: str | None = None
+    compensate_tool: str | None = None
+    snapshot: ToolSnapshot | None = None
+    reason_field: str | None = None
+    tags: tuple[str, ...] = ()
+
+    @property
+    def is_read_only(self) -> bool:
+        return self.risk_level is RiskLevel.READ_ONLY
+
+    def describe(self) -> dict[str, Any]:
+        """给编排层(以及后续 MCP / function-calling)的完整工具说明。"""
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "risk_level": self.risk_level.value,
+            "read_only": self.is_read_only,
+            "parameters": self.params_model.model_json_schema(),
+            "preconditions": list(self.preconditions),
+            "side_effect": self.side_effect,
+            "idempotent": self.idempotent,
+            "idempotency_key": self.idempotency_key,
+            "compensate_tool": self.compensate_tool,
+            # 让编排层/策略引擎知道这个工具能不能产出可读的审计 diff
+            "audit_snapshot": self.snapshot is not None,
+            "audit_reason_field": self.reason_field,
+            "tags": list(self.tags),
+        }
+
+    async def capture(self, context: ToolContext, params: BaseModel) -> dict[str, Any] | None:
+        """取审计快照。只读工具不产生审计行,恒返回 None。"""
+        if self.is_read_only or self.snapshot is None:
+            return None
+        return await self.snapshot(context, params)
+
+    def extract_reason(self, params: BaseModel, arguments: Mapping[str, Any]) -> str | None:
+        """从参数里取「为什么做这次操作」。审计要能自证动机,而不是只记结果。"""
+        if self.reason_field is None:
+            return None
+        value = getattr(params, self.reason_field, None)
+        if value is None:
+            value = arguments.get(self.reason_field)
+        return str(value) if value is not None else None

@@ -1,0 +1,36 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+.coverage
+htmlcov/
+
+# --- Node ---
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+.turbo/
+
+# --- Playwright ---
+test-results/
+playwright-report/
+blob-report/
+
+# --- env & secrets ---
+.env
+.env.*
+!.env.example
+
+# --- editor / os ---
+.vscode/
+.idea/
+.DS_Store
+
+# --- 本地临时备份 ---
+*.bak
