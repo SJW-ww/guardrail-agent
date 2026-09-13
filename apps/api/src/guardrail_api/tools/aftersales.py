@@ -7,7 +7,7 @@ from sqlalchemy import select
 from guardrail_api.domain.errors import NotFound
 from guardrail_api.models import AftersalesTicket, Order, RefundReasonCode, TicketStatus
 from guardrail_api.services import aftersales
-from guardrail_api.tools.base import RiskLevel, ToolContext
+from guardrail_api.tools.base import CompensateArg, RiskLevel, ToolContext
 from guardrail_api.tools.order import load_order
 from guardrail_api.tools.registry import register
 
@@ -145,6 +145,12 @@ async def ticket_snapshot(context: ToolContext, params: CloseTicketParams) -> di
     idempotent=True,
     idempotency_key="hash(run_id, tool, args)",
     compensate_tool="close_ticket",
+    # 补偿参数从原步骤的产出里取:退款工单的 ticket_id 是这次写入产生的,
+    # 只有它才能精确地把这一条关掉(而不是"关掉这张订单上的某个工单")。
+    compensate_args={
+        "ticket_id": CompensateArg(result_path="ticket_id"),
+        "reason": CompensateArg(const="计划未完成,系统按声明撤销这条退款申请"),
+    },
     snapshot=refund_snapshot,
     reason_field="description",
     amount_field="amount_cents",

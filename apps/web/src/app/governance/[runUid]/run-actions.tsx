@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { ApiErrorNotice } from "@/components/api-error-notice";
-import { approveStep, executeRun, retryStep } from "@/lib/api";
+import { approveStep, compensateRun, executeRun, retryStep } from "@/lib/api";
 
 /**
  * 执行详情页上的审批身份。刻意用一个**不同于发起者**的人:
@@ -112,6 +112,36 @@ export function RunActions({
           </>
         )}
 
+        {status === "FAILED" && (
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() =>
+              run("compensate", async () => {
+                const payload = await compensateRun(runUid, approver);
+                // 契约里这两个字段带默认值,所以生成出来的类型是可选的;
+                // 后端每次都显式返回,这里只是把类型边界补齐。
+                const compensated = payload.compensated ?? [];
+                const blockers = payload.blockers ?? [];
+                const rolledBack = compensated
+                  .map((seq) => `#${Math.abs(seq)}`)
+                  .join("、");
+                setNotice(
+                  blockers.length > 0
+                    ? `撤不干净,一步都没撤:${blockers.join(";")}`
+                    : rolledBack
+                      ? `已按声明逆序撤销:${rolledBack}`
+                      : "没有需要撤销的写操作",
+                );
+                return payload;
+              })
+            }
+            className="rounded-md bg-rose-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-600 disabled:opacity-50"
+          >
+            {busy === "compensate" ? "撤销中…" : "撤销这次执行"}
+          </button>
+        )}
+
         {steps.map((step) => (
           <button
             key={step.seq}
@@ -128,6 +158,10 @@ export function RunActions({
       <p className="text-xs text-neutral-500">
         重试一个已成功的步骤只会命中幂等账本,不会产生第二次副作用 ——
         这是「可写」能上生产的前提。
+      </p>
+      <p className="text-xs text-neutral-500">
+        「撤销这次执行」按工具声明的补偿动作逆序撤回已成功的写操作:
+        撤不干净时一步都不撤,并把原因写回来(部分补偿比不补偿更难排查)。
       </p>
       {approval && approval.required > 1 && (
         <p className="text-xs text-amber-300/90">

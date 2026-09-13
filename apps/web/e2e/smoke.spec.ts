@@ -231,3 +231,93 @@ test("多步计划:先查可退额度,再按查到的金额退款", async ({ pag
     target.total_amount_cents,
   );
 });
+
+test("失败执行触发补偿:撤不干净时停在等人点,点了才真的撤", async ({ page, request }) => {
+  // 挑订单不能靠"有没有工单":种子数据里已经有 200 张工单,列表还有分页。
+  // 直接问只读工具"这张单还能退多少",拿真实额度说话。
+  const ordersResponse = await request.get(`${API}/api/orders?status=PAID&limit=100`);
+  const orders = (await ordersResponse.json()) as { items: OrderSummary[] };
+
+  let target: OrderSummary | undefined;
+  for (const candidate of [...orders.items].reverse()) {
+    const probe = await request.post(`${API}/api/tools/query_refundable/invoke`, {
+      data: { arguments: { order_id: candidate.order_id } },
+      headers: { "X-Actor": "operator-01" },
+    });
+    if (!probe.ok()) continue;
+    const body = (await probe.json()) as { result?: { available_refund_cents?: number } };
+    if ((body.result?.available_refund_cents ?? 0) >= 100) {
+      target = candidate;
+      break;
+    }
+  }
+  expect(target, "需要一张还有可退额度的已支付订单,请先执行 make seed-reset").toBeTruthy();
+  const order = target as OrderSummary;
+
+  // 第 1 步会成功(退款申请工单),第 2 步必然失败 —— 失败出口要按声明把第 1 步撤回来
+  const created = await request.post(`${API}/api/runs`, {
+    data: {
+      goal: "补偿链路端到端验收",
+      steps: [
+        {
+          seq: 1,
+          tool: "create_refund",
+          args: {
+            order_id: order.order_id,
+            reason_code: "QUALITY_ISSUE",
+            amount_cents: 100,
+            description: "补偿验收",
+          },
+        },
+        {
+          seq: 2,
+          tool: "query_order",
+          args: { order_no: "E2E-NOT-EXIST" },
+          depends_on: [1],
+        },
+      ],
+    },
+    headers: { "X-Actor": "agent:guardrail" },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const runUid = ((await created.json()) as { run_uid: string }).run_uid;
+
+  // 第 1 步是高风险写操作:先按 L2 的规矩签字,再推进执行
+  await request.post(`${API}/api/runs/${runUid}/steps/1/approve`, {
+    headers: { "X-Actor": "supervisor-01" },
+  });
+  const executed = await request.post(`${API}/api/runs/${runUid}/execute`);
+  expect(executed.ok(), await executed.text()).toBeTruthy();
+
+  // 补偿动作 close_ticket 在默认信任等级下要人工确认:自动补偿**一步都没执行**,停在等人点
+  const parked = (await (await request.get(`${API}/api/runs/${runUid}`)).json()) as {
+    status: string;
+    checkpoint: { compensation?: { status?: string } };
+  };
+  expect(parked.status).toBe("FAILED");
+  expect(parked.checkpoint.compensation?.status).toBe("NEEDS_APPROVAL");
+
+  await page.goto(`/governance/${runUid}`);
+  await expect(page.getByText(/补偿 NEEDS_APPROVAL/)).toBeVisible();
+  await expect(
+    page.getByText("补偿动作在当前权限下需要人工确认:由有权限的人点「撤销这次执行」继续。"),
+  ).toBeVisible();
+  // 失败原因本身也留在页面上:补偿是"为什么失败"的一部分,不是另一件事
+  await expect(page.getByText(/E2E-NOT-EXIST/).first()).toBeVisible();
+
+  // 点按钮 = 有人点头:补偿动作记名执行,工单被关掉
+  await expect(page.getByRole("button", { name: "撤销这次执行" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "撤销这次执行" })).toHaveClass(/bg-rose-700/);
+  await page.getByRole("button", { name: "撤销这次执行" }).click();
+
+  await expect(page.getByText(/补偿 COMPENSATED/)).toBeVisible();
+  await expect(page.getByText("这次执行的写操作已按声明逆序撤销完毕。")).toBeVisible();
+  await expect(page.getByText(/close_ticket 撤销第 1 步/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "撤销这次执行" })).toHaveCount(0);
+
+  const after = (await (await request.get(`${API}/api/tickets?limit=100`)).json()) as {
+    items: TicketSummary[];
+  };
+  const ticket = after.items.find((item) => item.order_id === order.order_id);
+  expect(ticket?.status).toBe("CLOSED");
+});

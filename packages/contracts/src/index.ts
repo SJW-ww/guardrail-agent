@@ -52,6 +52,7 @@ export type RunListResponse = Schemas["RunListResponse"];
 export type StepView = Schemas["StepView"];
 export type ExecuteRunResponse = Schemas["ExecuteResponse"];
 export type RetryStepResponse = Schemas["RetryStepResponse"];
+export type CompensateResponse = Schemas["CompensateResponse"];
 export type PlannedStepIn = Schemas["PlannedStepIn"];
 export type CreateRunRequest = Schemas["CreateRunRequest"];
 export type AuditEntry = Schemas["AuditEntry"];

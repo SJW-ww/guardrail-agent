@@ -9,6 +9,7 @@
 「已经不属于自己」的数据上继续写。
 """
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from sqlalchemy import or_, select, update
@@ -30,11 +31,21 @@ async def claim_runs(
     limit: int = 1,
     run_uid: str | None = None,
     now: datetime | None = None,
+    statuses: Sequence[RunStatus] | None = None,
+    count_attempt: bool = True,
 ) -> list[AgentRun]:
-    """原子领取待执行的 run。租约已过期的 RUNNING 会被视为可领取(崩溃恢复入口)。"""
+    """原子领取待执行的 run。租约已过期的 RUNNING 会被视为可领取(崩溃恢复入口)。
+
+    `statuses` 默认是「可以推进」的两个状态。补偿是一个例外:它要处理的是**已经失败**的
+    run,所以调用方会显式传 `(FAILED,)` —— 领取规则放宽的那一处必须在调用点上写出来,
+    而不是让 FAILED 悄悄变成可领取。
+
+    `count_attempt=False` 用于补偿:attempt 是「这条 run 被推进了几次」,
+    补偿不是推进正向计划,把它算进去会让退避和"重试次数用完了吗"的判断失真。
+    """
     now = now or utcnow()
     statement = select(AgentRun).where(
-        AgentRun.status.in_(CLAIMABLE_STATUSES),
+        AgentRun.status.in_(statuses or CLAIMABLE_STATUSES),
         or_(
             AgentRun.lease_owner.is_(None),
             AgentRun.lease_expires_at.is_(None),
@@ -49,7 +60,8 @@ async def claim_runs(
         run.lease_owner = worker_id
         run.lease_expires_at = now + timedelta(seconds=lease_seconds)
         run.heartbeat_at = now
-        run.attempt += 1
+        if count_attempt:
+            run.attempt += 1
         # 被领取即视为在跑。心跳的 WHERE 条件里有 status=RUNNING ——
         # 如果这里不落 RUNNING,第一个步骤执行期间的心跳会被自己拒掉。
         run.status = RunStatus.RUNNING

@@ -59,6 +59,9 @@ services:
       LEASE_SECONDS: ${LEASE_SECONDS:-30}
       HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-10}
       MAX_STEP_RETRIES: ${MAX_STEP_RETRIES:-3}
+      # 补偿(W6):失败之后要不要自动把已经成功的写操作撤回来。
+      # auto / manual / off —— 见 .env.example
+      COMPENSATION_MODE: ${COMPENSATION_MODE:-auto}
       WATCHFILES_FORCE_POLLING: "true"
     ports:
       - "${API_PORT:-8000}:8000"

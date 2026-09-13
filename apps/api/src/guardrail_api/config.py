@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # 配了角色才知道"主管和财务"这种组织约束 —— 两个主管互相签字不算双人复核。
     policy_approver_roles: str = ""
 
+    # --- 补偿 Saga(W6)---
+    # auto:计划失败时,若能证明每一步都撤得干净,就按声明的补偿动作自动回滚;
+    # manual/off:停在那里等人(人的触发会记名)。
+    # 默认 auto 不等于"无脑自动写":补偿动作本身也要过策略引擎,
+    # 默认 L2 档下 low 风险的补偿动作仍会要求人工确认,于是 auto 会退化成"提示人来点"。
+    compensation_mode: Literal["auto", "manual", "off"] = "auto"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

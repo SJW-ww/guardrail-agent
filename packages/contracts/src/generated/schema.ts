@@ -360,6 +360,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_uid}/compensate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 撤销这次执行(按声明逆序补偿)
+         * @description 把这条 run 已经成功的写操作,按工具声明的补偿动作**逆序**撤回来。
+         *
+         *     幂等:已经撤过的 run 再点一次,直接返回现状,不会再撤一遍。
+         *     调用方点了这个按钮就等于**点了头**,所以走 `force=True` —— 它只解开
+         *     「需要人工确认」,解不开策略引擎的 DENY(越权的事点几次都还是越权)。
+         *
+         *     撤不掉的部分不吞:`blockers` 会带着原因返回,并且**一步都不执行** ——
+         *     部分补偿比不补偿更难排查。
+         */
+        post: operations["compensate_run_api_runs__run_uid__compensate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{run_uid}/steps/{seq}/retry": {
         parameters: {
             query?: never;
@@ -479,6 +506,20 @@ export interface components {
              * @description 取消原因,会写进订单与审计
              */
             reason: string;
+        };
+        /** CompensateResponse */
+        CompensateResponse: {
+            run: components["schemas"]["RunDetail"];
+            /**
+             * Compensated
+             * @description 这次真正撤掉的步骤(负数序号,-1 表示撤的是第 1 步)
+             */
+            compensated?: number[];
+            /**
+             * Blockers
+             * @description 撤不掉的原因;非空说明还有写操作留在库里
+             */
+            blockers?: string[];
         };
         /** CreateRunRequest */
         CreateRunRequest: {
@@ -905,7 +946,7 @@ export interface components {
          * StepKind
          * @enum {string}
          */
-        StepKind: "EXECUTE" | "APPROVAL";
+        StepKind: "EXECUTE" | "APPROVAL" | "COMPENSATE";
         /**
          * StepStatus
          * @enum {string}
@@ -1704,6 +1745,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    compensate_run_api_runs__run_uid__compensate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-actor"?: string | null;
+            };
+            path: {
+                run_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompensateResponse"];
                 };
             };
             /** @description Validation Error */

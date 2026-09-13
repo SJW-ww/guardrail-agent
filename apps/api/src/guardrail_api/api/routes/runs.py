@@ -340,6 +340,65 @@ class RetryStepResponse(BaseModel):
     error: str | None = None
 
 
+class CompensateResponse(BaseModel):
+    run: RunDetail
+    compensated: list[int] = Field(
+        default_factory=list, description="这次真正撤掉的步骤(负数序号,-1 表示撤的是第 1 步)"
+    )
+    blockers: list[str] = Field(
+        default_factory=list, description="撤不掉的原因;非空说明还有写操作留在库里"
+    )
+
+
+@router.post(
+    "/{run_uid}/compensate",
+    response_model=CompensateResponse,
+    summary="撤销这次执行(按声明逆序补偿)",
+)
+async def compensate_run(run_uid: str, session: SessionDep, actor: ActorDep) -> CompensateResponse:
+    """把这条 run 已经成功的写操作,按工具声明的补偿动作**逆序**撤回来。
+
+    幂等:已经撤过的 run 再点一次,直接返回现状,不会再撤一遍。
+    调用方点了这个按钮就等于**点了头**,所以走 `force=True` —— 它只解开
+    「需要人工确认」,解不开策略引擎的 DENY(越权的事点几次都还是越权)。
+
+    撤不掉的部分不吞:`blockers` 会带着原因返回,并且**一步都不执行** ——
+    部分补偿比不补偿更难排查。
+    """
+    run = await _by_uid(session, run_uid)
+    if run.status is RunStatus.COMPENSATED:
+        # 重复点击 / 重放同一个请求:不报错,也不重复动库。
+        return CompensateResponse(
+            run=await _detail(session, run),
+            compensated=await _compensated_seqs(session, run),
+        )
+
+    executor = RunExecutor(get_session_factory(), worker_id=INLINE_WORKER_ID)
+    outcome = await executor.compensate(run_uid, actor=normalize_actor(actor), force=True)
+
+    session.expire_all()
+    return CompensateResponse(
+        run=await _detail(session, await _by_uid(session, run_uid)),
+        compensated=[item.seq for item in outcome.compensated],
+        blockers=outcome.blockers,
+    )
+
+
+async def _compensated_seqs(session: AsyncSession, run: AgentRun) -> list[int]:
+    rows = (
+        await session.execute(
+            select(AgentStep.seq)
+            .where(
+                AgentStep.run_id == run.id,
+                AgentStep.kind == StepKind.COMPENSATE,
+                AgentStep.status == StepStatus.SUCCEEDED,
+            )
+            .order_by(AgentStep.seq)
+        )
+    ).scalars()
+    return list(rows)
+
+
 @router.post(
     "/{run_uid}/steps/{seq}/retry", response_model=RetryStepResponse, summary="重跑单步(幂等兜底)"
 )

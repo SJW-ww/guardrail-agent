@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from guardrail_api.domain.errors import DomainError, NotFound, ToolArgumentError
 from guardrail_api.tools.base import (
     AmountResolver,
+    CompensateArg,
     RiskLevel,
     ToolContext,
     ToolHandler,
@@ -63,6 +64,11 @@ class ToolRegistry:
                 )
             if not spec.compensate_tool:
                 raise RuntimeError(f"高风险工具 {spec.name} 必须声明补偿动作 compensate_tool")
+            if not spec.compensate_args:
+                raise RuntimeError(
+                    f"工具 {spec.name} 声明了补偿动作 {spec.compensate_tool},"
+                    "却没有声明补偿参数 compensate_args —— 真到要回滚的时候没人知道该传什么"
+                )
 
     def validate(self) -> None:
         """加载后自检:补偿动作必须真实存在,否则「可回滚」就是空话。"""
@@ -201,6 +207,7 @@ def register(
     reason_field: str | None = None,
     amount_field: str | None = None,
     amount_resolver: AmountResolver | None = None,
+    compensate_args: Mapping[str, CompensateArg] | None = None,
     tags: tuple[str, ...] = (),
 ) -> Any:
     """把一个 async 函数注册成领域工具。"""
@@ -224,6 +231,7 @@ def register(
                 reason_field=reason_field,
                 amount_field=amount_field,
                 amount_resolver=amount_resolver,
+                compensate_args=compensate_args,
                 tags=tags,
             )
         )

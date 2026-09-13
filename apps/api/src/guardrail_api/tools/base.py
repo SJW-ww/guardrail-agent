@@ -56,6 +56,23 @@ AmountResolver = Callable[[ToolContext, Any], Awaitable[int | None]]
 
 
 @dataclass(frozen=True, slots=True)
+class CompensateArg:
+    """补偿动作的参数从哪来。
+
+    只有两种来源,刻意不支持表达式:
+
+    - `result_path`:从**原步骤的产出**里取(例:退款工单的 `ticket_id`);
+    - `const`:写死的字面量(例:"计划未完成,自动撤销")。
+
+    取不到值就是**不能自动补偿** —— 不猜、不用默认值。补偿写错比不补偿更糟:
+    它会以"系统自动回滚"的名义动生产数据。
+    """
+
+    result_path: str | None = None
+    const: Any = None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolSpec:
     name: str
     title: str
@@ -69,6 +86,9 @@ class ToolSpec:
     idempotent: bool = False
     idempotency_key: str | None = None
     compensate_tool: str | None = None
+    #: 补偿工具的入参怎么来(见 `CompensateArg`)。声明了 compensate_tool 就必须声明它 ——
+    #: 否则「可补偿」只是一句口号,真到要回滚的时候没人知道该传什么参数。
+    compensate_args: Mapping[str, CompensateArg] | None = None
     snapshot: ToolSnapshot | None = None
     reason_field: str | None = None
     # 声明「哪个参数是金额」。策略引擎据此套用额度(如 L4 单笔自主限额),
@@ -97,6 +117,14 @@ class ToolSpec:
             "idempotent": self.idempotent,
             "idempotency_key": self.idempotency_key,
             "compensate_tool": self.compensate_tool,
+            "compensate_args": (
+                {
+                    name: {"result_path": arg.result_path, "const": arg.const}
+                    for name, arg in self.compensate_args.items()
+                }
+                if self.compensate_args
+                else None
+            ),
             # 让编排层/策略引擎知道这个工具能不能产出可读的审计 diff
             "audit_snapshot": self.snapshot is not None,
             "audit_reason_field": self.reason_field,

@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from guardrail_api.domain.errors import NotFound, ToolArgumentError
 from guardrail_api.tools import RiskLevel, ToolContext, load_tools, registry
-from guardrail_api.tools.base import ToolSpec
+from guardrail_api.tools.base import CompensateArg, ToolSpec
 from guardrail_api.tools.registry import ToolRegistry
 
 
@@ -171,6 +171,9 @@ def test_broken_compensation_reference_fails_validation() -> None:
             idempotent=True,
             idempotency_key="hash(run_id, tool, args)",
             compensate_tool="not_registered_anywhere",
+            # 补偿参数声明齐了,才能走到「补偿目标是否存在」这一步自检 ——
+            # 少声明参数会先被注册期拦下,测不到这里想测的分支。
+            compensate_args={"reason": CompensateArg(const="回滚")},
             snapshot=ping_snapshot,
         )
     )

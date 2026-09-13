@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -28,8 +28,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from guardrail_api.config import Settings, get_settings
 from guardrail_api.domain.clock import utcnow
-from guardrail_api.domain.errors import DomainError, LeaseLost, PlanError, RunBudgetExceeded
-from guardrail_api.governance import audit, idempotency, lease, policy
+from guardrail_api.domain.errors import (
+    DomainError,
+    LeaseLost,
+    PlanError,
+    RuleViolation,
+    RunBudgetExceeded,
+)
+from guardrail_api.governance import audit, compensation, idempotency, lease, policy
 from guardrail_api.governance import plan as plan_module
 from guardrail_api.governance.policy import PolicyDecision, PolicyVerdict
 from guardrail_api.models import (
@@ -115,6 +121,21 @@ class StepOutcome:
     # 原始异常对象。领域错误带字段级 context,调用方(HTTP 入口)需要它才能给出
     # 「哪个字段错了」而不是一句笼统的失败理由。
     cause: Exception | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(slots=True)
+class CompensationResult:
+    """一次补偿的结果。`blockers` 非空说明:**部分或全部写操作还留在库里**,
+    而且原因写清楚了 —— 这是给人和 runbook 看的,不是给日志看的。
+    """
+
+    status: RunStatus
+    outcomes: list[StepOutcome] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+
+    @property
+    def compensated(self) -> list[StepOutcome]:
+        return [item for item in self.outcomes if item.status is StepStatus.SUCCEEDED]
 
 
 @dataclass(slots=True)
@@ -213,14 +234,26 @@ class RunExecutor:
 
         return result
 
-    async def claim(self, run_uid: str) -> bool:
-        """领取租约。返回 False 说明这个 run 正被别的执行者持有。"""
+    async def claim(
+        self,
+        run_uid: str,
+        *,
+        statuses: Sequence[RunStatus] | None = None,
+        count_attempt: bool = True,
+    ) -> bool:
+        """领取租约。返回 False 说明这个 run 正被别的执行者持有。
+
+        `statuses` 只在补偿时传 `(FAILED,)` —— 撤回失败计划的写操作,
+        要动的正是一个已经失败的 run。
+        """
         async with self._sessions() as session:
             claimed = await lease.claim_runs(
                 session,
                 worker_id=self.worker_id,
                 lease_seconds=self.settings.lease_seconds,
                 run_uid=run_uid,
+                statuses=statuses,
+                count_attempt=count_attempt,
             )
             await session.commit()
         return bool(claimed)
@@ -284,6 +317,7 @@ class RunExecutor:
             if len(completed) >= step_budget:
                 message = f"run {run_uid} 超出步骤预算 {step_budget},停止推进"
                 await self._finish(run_uid, RunStatus.FAILED, error=message)
+                await self._after_failure(run_uid, actor=actor, error=message)
                 raise RunBudgetExceeded(message, run_uid=run_uid, step_budget=step_budget)
 
             step = remaining[0]
@@ -295,8 +329,7 @@ class RunExecutor:
                 _assert_deps_done(step, completed)
             except PlanError as exc:
                 await self._record_failure(run_uid, step, exc.message, retryable=False)
-                await self._finish(run_uid, RunStatus.FAILED, error=exc.message)
-                result.status = RunStatus.FAILED
+                result.status = await self._after_failure(run_uid, actor=actor, error=exc.message)
                 return
 
             try:
@@ -304,8 +337,7 @@ class RunExecutor:
             except PlanError as exc:
                 message = f"第 {step.seq} 步的参数引用解析失败:{exc.message}"
                 await self._record_failure(run_uid, step, message, retryable=False)
-                await self._finish(run_uid, RunStatus.FAILED, error=message)
-                result.status = RunStatus.FAILED
+                result.status = await self._after_failure(run_uid, actor=actor, error=message)
                 return
 
             spec = self.registry.get(step.tool)
@@ -321,8 +353,7 @@ class RunExecutor:
             if verdict.decision is PolicyDecision.DENY:
                 message = f"策略引擎拒绝执行:{verdict.reason}"
                 await self._record_failure(run_uid, step, message, retryable=False, verdict=verdict)
-                await self._finish(run_uid, RunStatus.FAILED, error=message)
-                result.status = RunStatus.FAILED
+                result.status = await self._after_failure(run_uid, actor=actor, error=message)
                 return
 
             # 审批门是「更严的那一个说了算」:计划里标了要审批的照旧要审批;
@@ -343,9 +374,249 @@ class RunExecutor:
             outcome = await self._execute_step(run_uid, step, verdict)
             result.outcomes.append(outcome)
             if outcome.status is StepStatus.FAILED:
-                async with self._sessions() as session:
-                    result.status = (await self._load(session, run_uid)).status
+                # 失败出口统一收尾:先留痕,再按 compensation_mode 决定要不要
+                # 把这次执行已经成功的写操作逆序撤回来。
+                result.status = await self._after_failure(
+                    run_uid, actor=actor, error=outcome.error or "步骤执行失败"
+                )
                 return
+
+    # ---------- 补偿(Saga) ----------
+
+    async def compensate(
+        self, run_uid: str, *, actor: str, force: bool = False
+    ) -> CompensationResult:
+        """把这条 run 已经成功的写操作按逆序撤回来。
+
+        `force=True` 表示**有人点了头**:补偿动作本身要过策略引擎,
+        默认信任等级下它可能被判成「需要人工审批」;人既然已经点了按钮,
+        这次就按记名执行(审计记的是这个人的身份,不是"系统").
+        """
+        if not await self.claim(run_uid, statuses=(RunStatus.FAILED,), count_attempt=False):
+            raise RuleViolation(f"run {run_uid} 现在不能被补偿(只允许对已失败的执行做补偿)")
+        return await self._compensate_locked(run_uid, actor=actor, force=force)
+
+    async def _after_failure(self, run_uid: str, *, actor: str, error: str) -> RunStatus:
+        """失败出口的统一收尾:按 `compensation_mode` 决定要不要自动撤销。
+
+        - `off`    : 只留失败现场。
+        - `manual` : 留失败现场,等人工走 `POST /api/runs/{uid}/compensate`。
+        - `auto`   : 立刻按声明逆序补偿。撤不干净会被 `compensation.plan` 的
+                     blockers 挡下来 —— 宁可不撤,也不做部分补偿。
+
+        这里走 `_compensate_locked` 而不是 `compensate()`:租约还在自己手里,
+        `compensate()` 那条领取路径是给"另一个进程来补偿"用的。
+        """
+        if self.settings.compensation_mode != "auto":
+            return RunStatus.FAILED
+        outcome = await self._compensate_locked(
+            run_uid, actor=actor, force=False, origin_error=error
+        )
+        return outcome.status
+
+    async def _compensate_locked(
+        self, run_uid: str, *, actor: str, force: bool, origin_error: str | None = None
+    ) -> CompensationResult:
+        """按声明的补偿动作逆序回滚。撤不干净就停下来告诉人,不做部分补偿。
+
+        `origin_error` 是这条 run 当初为什么失败。补偿成功时也把它留在 `last_error`
+        上 —— 否则一次"成功回滚"会把「为什么需要回滚」的理由抹掉。
+        """
+        async with self._sessions() as session:
+            run = await self._load(session, run_uid)
+            completed = await self._completed_write_steps(session, run.id)
+            trace_id = run.trace_id
+            origin_error = origin_error or run.last_error
+
+        plan = compensation.plan(
+            [
+                compensation.CompletedStep(seq=item.seq, tool=item.tool_name, result=item.result)
+                for item in completed
+            ],
+            registry=self.registry,
+        )
+
+        if plan.blockers:
+            message = _join_reasons(origin_error, "无法自动补偿:" + ";".join(plan.blockers))
+            await self._mark_compensation(run_uid, status="BLOCKED", steps=plan.steps)
+            await self._finish(run_uid, RunStatus.FAILED, error=message)
+            return CompensationResult(status=RunStatus.FAILED, blockers=plan.blockers)
+
+        if not plan.steps:
+            # 没有任何写操作需要撤:状态保持 FAILED(改成 COMPENSATED 会谎称"撤回过")。
+            # 但必须落一次终态把租约交还 —— 否则这条 run 一直占着租约,
+            # 过期后还会被当普通 run 重新领取执行。
+            await self._mark_compensation(run_uid, status="NOTHING_TO_ROLLBACK", steps=[])
+            await self._finish(run_uid, RunStatus.FAILED, error=origin_error)
+            return CompensationResult(status=RunStatus.FAILED, blockers=[])
+
+        outcomes: list[StepOutcome] = []
+        for step in plan.steps:
+            verdict = self._judge(
+                PlannedStep(seq=step.seq, tool=step.tool, args=step.args, kind=StepKind.COMPENSATE),
+                actor=actor,
+            )
+            if verdict.decision is PolicyDecision.DENY:
+                message = _join_reasons(origin_error, f"补偿被策略拒绝:{verdict.reason}")
+                await self._mark_compensation(run_uid, status="BLOCKED", steps=plan.steps)
+                await self._finish(run_uid, RunStatus.FAILED, error=message)
+                return CompensationResult(
+                    status=RunStatus.FAILED, outcomes=outcomes, blockers=[message]
+                )
+            if verdict.decision is PolicyDecision.REQUIRE_APPROVAL and not force:
+                # 自动补偿到此为止:补偿也是写操作,权限不够就得有人签字。
+                # 注意这里**不执行任何一步**:部分补偿比不补偿更难排查。
+                message = (
+                    f"已失败的步骤可以按声明撤销,但补偿动作 {step.tool} 在当前权限下需要人工确认:"
+                    f"请由有权限的人调用 POST /api/runs/{run_uid}/compensate"
+                )
+                await self._mark_compensation(run_uid, status="NEEDS_APPROVAL", steps=plan.steps)
+                await self._finish(
+                    run_uid, RunStatus.FAILED, error=_join_reasons(origin_error, message)
+                )
+                return CompensationResult(
+                    status=RunStatus.FAILED, outcomes=outcomes, blockers=[message]
+                )
+
+            outcome = await self._execute_compensation_step(
+                run_uid, step, actor=actor, trace_id=trace_id, verdict=verdict
+            )
+            outcomes.append(outcome)
+            if outcome.status is StepStatus.FAILED:
+                message = _join_reasons(
+                    origin_error,
+                    f"补偿第 {step.source_seq} 步失败:{outcome.error};"
+                    "已经撤掉的部分不会自动回滚回去 —— 需要人工核对",
+                )
+                # PARTIAL 是唯一"下次不许重试"的补偿状态:库里有撤了一半的东西,
+                # 再重放正向步骤,系统状态就没人验证过了。
+                await self._mark_compensation(run_uid, status="PARTIAL", steps=plan.steps)
+                await self._finish(run_uid, RunStatus.FAILED, error=message)
+                return CompensationResult(
+                    status=RunStatus.FAILED, outcomes=outcomes, blockers=[message]
+                )
+
+        await self._mark_compensation(run_uid, status="COMPENSATED", steps=plan.steps)
+        return CompensationResult(
+            status=await self._finish(run_uid, RunStatus.COMPENSATED, error=origin_error),
+            outcomes=outcomes,
+        )
+
+    async def _mark_compensation(
+        self, run_uid: str, *, status: str, steps: Sequence[compensation.CompensationStep]
+    ) -> None:
+        """把「补偿走到哪一步了」写进 checkpoint。
+
+        **必须落库**:补偿可能是异步的、可能要人签字、可能撤到一半失败。
+        只写日志的话,下一个打开这条 run 的人(或下一个 worker)无从知道
+        库里现在到底是全撤了、没撤、还是撤了一半。
+        """
+        async with self._sessions() as session:
+            run = await self._load(session, run_uid)
+            checkpoint = dict(run.checkpoint or {})
+            checkpoint["compensation"] = {
+                "status": status,
+                "planned": [
+                    {"seq": item.seq, "tool": item.tool, "reason": item.reason} for item in steps
+                ],
+                "at": utcnow().isoformat(),
+            }
+            run.checkpoint = checkpoint
+            await session.commit()
+
+    async def _execute_compensation_step(
+        self,
+        run_uid: str,
+        step: compensation.CompensationStep,
+        *,
+        actor: str,
+        trace_id: str,
+        verdict: PolicyVerdict,
+    ) -> StepOutcome:
+        """执行一条补偿指令。和正向步骤共用幂等账本,所以重复触发不会撤两次。"""
+        spec = self.registry.get(step.tool)
+        planned = PlannedStep(
+            seq=step.seq, tool=step.tool, args=step.args, kind=StepKind.COMPENSATE
+        )
+        async with self._sessions() as session:
+            run = await self._load(session, run_uid)
+            key = idempotency.compute_key(
+                run_uid=run.run_uid, tool_name=spec.name, arguments=step.args
+            )
+            try:
+                step_row = await self._open_step(session, run_id=run.id, step=planned)
+                context = ToolContext(session=session, actor=actor, run_id=run.run_uid)
+                claim = await idempotency.claim(
+                    session,
+                    key=key,
+                    tool_name=spec.name,
+                    run_uid=run.run_uid,
+                    arguments=step.args,
+                    owner=self.worker_id,
+                )
+                if claim.replayed:
+                    outcome = await self._commit_replay(
+                        session, run, step_row, planned, claim.record.result, key
+                    )
+                    return outcome
+
+                params = self.registry.validate_args(spec.name, step.args)
+                before = await spec.capture(context, params)
+                result = await self.registry.invoke(spec.name, context, step.args, params=params)
+                after = await spec.capture(context, params)
+                payload = result.model_dump(mode="json")
+
+                await audit.append(
+                    session,
+                    trace_id=trace_id,
+                    run_uid=run.run_uid,
+                    step_seq=step.seq,
+                    actor=actor,
+                    tool_name=spec.name,
+                    risk_level=spec.risk_level.value,
+                    arguments=step.args,
+                    before=before,
+                    after=after,
+                    reason=step.reason,
+                    outcome=AuditOutcome.SUCCEEDED,
+                    policy_decision="COMPENSATE",
+                    policy_reason=step.reason,
+                )
+                await self._close_step(
+                    session, step_row, result=payload, idempotency_key=key, replayed=False
+                )
+                await idempotency.succeed(session, record=claim.record, result=payload)
+                await session.commit()
+                return StepOutcome(
+                    seq=step.seq,
+                    tool=spec.name,
+                    status=StepStatus.SUCCEEDED,
+                    result=payload,
+                    idempotency_key=key,
+                )
+            except Exception as exc:
+                await session.rollback()
+                # 补偿失败也要留痕,但它的审计归属和正向失败不一样:
+                # 动手的是补偿发起人(可能是人),裁决理由也要写明这是补偿。
+                return await self._record_failure(
+                    run_uid,
+                    planned,
+                    f"补偿失败:{exc}",
+                    retryable=False,
+                    verdict=verdict,
+                    actor=actor,
+                    policy_decision="COMPENSATE",
+                )
+
+    @staticmethod
+    async def _completed_write_steps(session: AsyncSession, run_id: int) -> list[AgentStep]:
+        """已成功、且**有副作用**的步骤(要回滚的就是它们)。"""
+        rows = await session.execute(
+            select(AgentStep)
+            .where(AgentStep.run_id == run_id, AgentStep.status == StepStatus.SUCCEEDED)
+            .order_by(AgentStep.seq)
+        )
+        return [row for row in rows.scalars().all() if row.kind is StepKind.EXECUTE]
 
     # ---------- 单步执行 ----------
 
@@ -360,6 +631,15 @@ class RunExecutor:
         并发重试之所以安全,靠的是幂等账本而不是互斥锁。
         """
         step = await self._planned_step(run_uid, seq)
+
+        async with self._sessions() as session:
+            run = await self._load(session, run_uid)
+            compensated = _retry_blocking_state(run)
+        if compensated is not None:
+            raise RuleViolation(
+                f"run {run_uid} 的补偿已经动过库({compensated}),不能重跑第 {seq} 步:"
+                "先撤后重放会把撤掉的写操作又做出来,而系统状态没人验证过。请新建一次执行。"
+            )
 
         # 重试也要看依赖:第 1 步没成功就重试第 2 步,重试出来的结果没有意义 ——
         # 「人工点一下」不是绕过编排规则的通行证。
@@ -658,7 +938,10 @@ class RunExecutor:
         completed = await self._completed_seqs_in(session, run.id)
         completed.add(step.seq)
         run.checkpoint_seq = max(run.checkpoint_seq, step.seq)
+        # 合并而不是整份重写:checkpoint 里除了"最后一步",还挂着补偿这类运行态标记,
+        # 覆盖式写入会在下一步成功时把它悄悄抹掉(见 _mark_compensation)。
         run.checkpoint = {
+            **(run.checkpoint or {}),
             "seq": run.checkpoint_seq,
             "tool": step.tool,
             "completed": sorted(completed),
@@ -679,8 +962,15 @@ class RunExecutor:
         *,
         retryable: bool,
         verdict: PolicyVerdict | None = None,
-    ) -> None:
-        """失败留痕。失败也写审计 —— 只记成功等于把事故现场擦干净。"""
+        actor: str | None = None,
+        policy_decision: str | None = None,
+    ) -> StepOutcome:
+        """失败留痕,并把这次的失败原样返回给调用方。
+
+        失败也写审计 —— 只记成功等于把事故现场擦干净。
+        `actor` / `policy_decision` 两个口子是给补偿用的:补偿失败时动手的是
+        补偿发起人,裁决理由也要写明这是补偿(见 `_execute_compensation_step`)。
+        """
         spec = self.registry.get(step.tool)
         async with self._sessions() as session:
             run = await self._load(session, run_uid)
@@ -696,7 +986,7 @@ class RunExecutor:
                     trace_id=run.trace_id,
                     run_uid=run.run_uid,
                     step_seq=step.seq,
-                    actor=run.actor,
+                    actor=actor or run.actor,
                     tool_name=step.tool,
                     risk_level=spec.risk_level.value,
                     arguments=step.args,
@@ -704,7 +994,8 @@ class RunExecutor:
                     after=None,
                     reason=message,
                     outcome=AuditOutcome.FAILED,
-                    policy_decision=verdict.decision.value if verdict else None,
+                    policy_decision=policy_decision
+                    or (verdict.decision.value if verdict else None),
                     policy_reason=verdict.reason if verdict else None,
                 )
 
@@ -719,7 +1010,16 @@ class RunExecutor:
                 run.status = RunStatus.FAILED
                 run.last_error = message
                 run.finished_at = utcnow()
+                # 终态不留租约。留着它,刚失败的 run 就补偿不了 ——
+                # `compensate()` 要求租约空闲或过期,而它正是"失败之后"才被调用的。
+                await lease.release(session, run_uid=run_uid, worker_id=self.worker_id)
             await session.commit()
+        return StepOutcome(
+            seq=step.seq,
+            tool=step.tool,
+            status=StepStatus.FAILED,
+            error=message,
+        )
 
     async def _wait_for_approval(
         self,
@@ -870,6 +1170,29 @@ def _policy_reason(verdict: PolicyVerdict, approvers: list[str]) -> str:
         who = "、".join(approvers)
         return f"{verdict.reason};该操作已获 {who} 批准后执行(共 {len(approvers)} 人签字)"
     return verdict.reason
+
+
+def _join_reasons(*parts: str | None) -> str:
+    """把「为什么失败」和「为什么撤不掉」拼起来 —— 合成一条也不该丢掉另一半。"""
+    return ";".join(item for item in parts if item)
+
+
+#: 补偿走到这两个状态之后,这条 run 就不再接受「重跑某一步」。
+#: 「撤掉过东西」和「重放某一步」是互斥的:先撤后重放,库里会多出
+#: 一个系统以为已经被撤掉的副作用。NEEDS_APPROVAL / BLOCKED /
+#: NOTHING_TO_ROLLBACK 都还没有动过库,重试是安全的,只做提示不做拦截。
+RETRY_BLOCKING_COMPENSATION_STATES = frozenset({"COMPENSATED", "PARTIAL"})
+
+
+def _retry_blocking_state(run: AgentRun) -> str | None:
+    """这条 run 现在还能不能重跑某一步?返回 None 表示可以。"""
+    state = (run.checkpoint or {}).get("compensation") or {}
+    status = str(state.get("status") or "")
+    if run.status is RunStatus.COMPENSATED:
+        return str(state.get("status") or RunStatus.COMPENSATED.value)
+    if status in RETRY_BLOCKING_COMPENSATION_STATES:
+        return status
+    return None
 
 
 def _digest(payload: dict[str, Any] | None) -> str | None:

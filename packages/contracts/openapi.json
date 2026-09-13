@@ -1089,6 +1089,65 @@
         }
       }
     },
+    "/api/runs/{run_uid}/compensate": {
+      "post": {
+        "tags": [
+          "governance"
+        ],
+        "summary": "撤销这次执行(按声明逆序补偿)",
+        "description": "把这条 run 已经成功的写操作,按工具声明的补偿动作**逆序**撤回来。\n\n幂等:已经撤过的 run 再点一次,直接返回现状,不会再撤一遍。\n调用方点了这个按钮就等于**点了头**,所以走 `force=True` —— 它只解开\n「需要人工确认」,解不开策略引擎的 DENY(越权的事点几次都还是越权)。\n\n撤不掉的部分不吞:`blockers` 会带着原因返回,并且**一步都不执行** ——\n部分补偿比不补偿更难排查。",
+        "operationId": "compensate_run_api_runs__run_uid__compensate_post",
+        "parameters": [
+          {
+            "name": "run_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Uid"
+            }
+          },
+          {
+            "name": "x-actor",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Actor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompensateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/runs/{run_uid}/steps/{seq}/retry": {
       "post": {
         "tags": [
@@ -1487,6 +1546,34 @@
           "reason"
         ],
         "title": "CancelOrderRequest"
+      },
+      "CompensateResponse": {
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/RunDetail"
+          },
+          "compensated": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Compensated",
+            "description": "这次真正撤掉的步骤(负数序号,-1 表示撤的是第 1 步)"
+          },
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Blockers",
+            "description": "撤不掉的原因;非空说明还有写操作留在库里"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run"
+        ],
+        "title": "CompensateResponse"
       },
       "CreateRunRequest": {
         "properties": {
@@ -2465,7 +2552,8 @@
         "type": "string",
         "enum": [
           "EXECUTE",
-          "APPROVAL"
+          "APPROVAL",
+          "COMPENSATE"
         ],
         "title": "StepKind"
       },

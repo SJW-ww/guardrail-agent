@@ -31,6 +31,50 @@ function readPolicy(checkpoint: Record<string, unknown> | null | undefined): Pol
 
 type ApprovalProgress = { required: number; collected: string[]; remaining: number };
 
+type CompensationInfo = { status: string; planned: string[] };
+
+/** checkpoint.compensation 是补偿流程留下的现场 —— 撤到哪一步、还剩几张单没撤。 */
+function readCompensation(
+  checkpoint: Record<string, unknown> | null | undefined,
+): CompensationInfo | null {
+  const raw = checkpoint?.compensation;
+  if (!raw || typeof raw !== "object") return null;
+  const state = raw as Record<string, unknown>;
+  const status = String(state.status ?? "");
+  if (!status) return null;
+  const planned = Array.isArray(state.planned)
+    ? state.planned.map((item) => {
+        const step = item as Record<string, unknown>;
+        return `${step.tool} 撤销第 ${Math.abs(Number(step.seq))} 步`;
+      })
+    : [];
+  return { status, planned };
+}
+
+/** 人话解释四种补偿现场。撤不干净的状态必须显眼 —— 库里还有东西没撤。 */
+const COMPENSATION_NOTICE: Record<string, { tone: string; text: string }> = {
+  COMPENSATED: {
+    tone: "border-emerald-900 bg-emerald-950/30 text-emerald-300",
+    text: "这次执行的写操作已按声明逆序撤销完毕。",
+  },
+  NOTHING_TO_ROLLBACK: {
+    tone: "border-neutral-800 bg-neutral-900/40 text-neutral-300",
+    text: "这次执行没有产生需要撤销的写操作。",
+  },
+  NEEDS_APPROVAL: {
+    tone: "border-amber-900 bg-amber-950/30 text-amber-300",
+    text: "补偿动作在当前权限下需要人工确认:由有权限的人点「撤销这次执行」继续。",
+  },
+  BLOCKED: {
+    tone: "border-rose-900 bg-rose-950/30 text-rose-300",
+    text: "撤不干净,系统一步都没撤:有步骤没声明补偿动作或补偿被策略拒绝。写操作仍留在库里,需要人工处理。",
+  },
+  PARTIAL: {
+    tone: "border-rose-900 bg-rose-950/30 text-rose-300",
+    text: "补偿撤到一半失败了:已经撤掉的部分不会自动回滚回去,库里现在是中间状态,需要人工核对。",
+  },
+};
+
 /** checkpoint.approval 是执行器挂起时写下的签名进度 —— 审批人要知道还差几个人。 */
 function readApproval(
   checkpoint: Record<string, unknown> | null | undefined,
@@ -60,6 +104,8 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
       : null;
     const policy = readPolicy(run.checkpoint);
     const approval = readApproval(run.checkpoint);
+    const compensation = readCompensation(run.checkpoint);
+    const compensationNotice = compensation ? COMPENSATION_NOTICE[compensation.status] : null;
 
     return (
       <div className="space-y-6">
@@ -71,11 +117,31 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
             <span className="font-mono">{run.trace_id.slice(0, 12)}</span> · 领取次数 {run.attempt}
           </p>
           {run.last_error && (
-            <p className="rounded-md border border-rose-900 bg-rose-950/30 px-3 py-2 text-sm text-rose-300">
-              最后一次失败:{run.last_error}
+            <p
+              className={`rounded-md border px-3 py-2 text-sm ${
+                run.status === "COMPENSATED"
+                  ? "border-neutral-800 bg-neutral-900/40 text-neutral-300"
+                  : "border-rose-900 bg-rose-950/30 text-rose-300"
+              }`}
+            >
+              {run.status === "COMPENSATED" ? "触发补偿的原因:" : "最后一次失败:"}
+              {run.last_error}
             </p>
           )}
         </section>
+
+        {compensation && compensationNotice && (
+          <section
+            className={`space-y-1 rounded-lg border px-4 py-3 text-sm ${compensationNotice.tone}`}
+          >
+            <p className="font-mono text-xs">
+              补偿 {compensation.status}
+              {compensation.planned.length > 0 &&
+                ` · 计划 ${compensation.planned.join(" / ")}`}
+            </p>
+            <p>{compensationNotice.text}</p>
+          </section>
+        )}
 
         {policy && (
           <section className="space-y-1 rounded-lg border border-amber-900/60 bg-amber-950/20 px-4 py-3">

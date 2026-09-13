@@ -89,6 +89,9 @@ class StepStatus(enum.StrEnum):
 class StepKind(enum.StrEnum):
     EXECUTE = "EXECUTE"
     APPROVAL = "APPROVAL"
+    #: 补偿(回滚)步骤。用负数 seq 与正向步骤分开:第 1 步的补偿是 -1,
+    #: 这样「补偿了谁」直接读得出来,也不会和原步骤抢 (run_id, seq) 的唯一约束。
+    COMPENSATE = "COMPENSATE"
 
 
 class IdempotencyStatus(enum.StrEnum):

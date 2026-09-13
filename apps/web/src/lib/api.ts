@@ -1,6 +1,7 @@
 import type {
   AuditListResponse,
   CancelOrderRequest,
+  CompensateResponse,
   ExecuteRunResponse,
   HealthResponse,
   OrderListResponse,
@@ -171,6 +172,16 @@ export const executeRun = (runUid: string) =>
 
 export const retryStep = (runUid: string, seq: number) =>
   request<RetryStepResponse>(`/api/runs/${runUid}/steps/${seq}/retry`, { method: "POST" });
+
+/**
+ * 撤销这次执行:把已经成功的写操作按工具声明的补偿动作**逆序**撤回来。
+ *
+ * 只有失败的执行能撤;已经撤过的再点一次直接返回现状(不会撤第二遍)。
+ * `blockers` 非空说明有东西撤不掉 —— 后端一步都不会执行,页面要把原因显示出来,
+ * 而不是只显示"失败了"。
+ */
+export const compensateRun = (runUid: string, actor?: string) =>
+  request<CompensateResponse>(`/api/runs/${runUid}/compensate`, { method: "POST", actor });
 
 /**
  * 批准一个挂起的步骤。**必须带审批人身份** —— 审计要记下"谁签的字"。
