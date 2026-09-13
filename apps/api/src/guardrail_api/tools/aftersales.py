@@ -118,6 +118,7 @@ async def ticket_snapshot(context: ToolContext, params: CloseTicketParams) -> di
     compensate_tool="close_ticket",
     snapshot=refund_snapshot,
     reason_field="description",
+    amount_field="amount_cents",
     tags=("aftersales", "write", "money"),
 )
 async def create_refund(context: ToolContext, params: CreateRefundParams) -> RefundTicketView:

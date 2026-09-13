@@ -14,13 +14,14 @@ dependencies = [
     "asyncpg>=0.30.0",
     "alembic>=1.14.0",
     "redis>=5.2.1",
+    # LLM 规划器调用 OpenAI 兼容的 chat/completions 接口
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.2",
-    "httpx>=0.28.1",
     "ruff>=0.9.6",
 ]
 

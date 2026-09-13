@@ -133,9 +133,38 @@ async def test_invalid_tool_arguments_return_422_with_field_errors(
     assert [item["field"] for item in errors] == ["order_id"]
 
 
-async def test_tool_invocation_creates_pending_ticket_without_moving_money(
+async def _create_pending_refund(
+    api_client: AsyncClient,
+    order_id: int,
+    *,
+    actor: str = "operator-07",
+    arguments: dict | None = None,
+) -> str:
+    """走完整链路拿到一张待审批工单:网关登记 → 策略要求审批 → 批准 → 推进 run。"""
+    response = await api_client.post(
+        "/api/tools/create_refund/invoke",
+        json={
+            "arguments": arguments or {"order_id": order_id, "reason_code": "QUALITY_ISSUE"},
+        },
+        headers={"X-Actor": actor},
+    )
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["status"] == "WAITING_APPROVAL"
+
+    run_uid = body["run_uid"]
+    await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-01"}
+    )
+    executed = await api_client.post(f"/api/runs/{run_uid}/execute")
+    assert executed.status_code == 200, executed.text
+    return run_uid
+
+
+async def test_high_risk_invocation_waits_for_approval_and_writes_nothing(
     session: AsyncSession, api_client: AsyncClient
 ) -> None:
+    """网关不是后门:高风险写操作在它这里同样被策略拦下,并如实返回 202。"""
     order = await _seed_order(session)
     await api_client.post(f"/api/orders/{order.id}/pay")
 
@@ -145,11 +174,31 @@ async def test_tool_invocation_creates_pending_ticket_without_moving_money(
         headers={"X-Actor": "operator-07"},
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
     body = response.json()
     assert body["actor"] == "human:operator-07", "操作者来自身份,不由请求体提供"
-    assert body["result"]["status"] == "PENDING"
-    assert body["result"]["refund_amount_cents"] == 2000
+    assert body["status"] == "WAITING_APPROVAL"
+    assert body["result"] == {}
+    assert "人工审批" in body["message"]
+    assert body["run_uid"]
+
+    # 拦得住才算护栏:审批之前业务表一行都不该多
+    tickets = await api_client.get("/api/tickets", params={"limit": 100})
+    assert tickets.json()["total"] == 0
+
+
+async def test_approved_run_creates_pending_ticket_without_moving_money(
+    session: AsyncSession, api_client: AsyncClient
+) -> None:
+    """批准之后工单才真的落库,而且只是 PENDING —— 一动钱就有人签字。"""
+    order = await _seed_order(session)
+    await api_client.post(f"/api/orders/{order.id}/pay")
+
+    await _create_pending_refund(api_client, order.id)
+
+    tickets = await api_client.get("/api/tickets", params={"status": "PENDING"})
+    ticket = tickets.json()["items"][0]
+    assert ticket["refund_amount_cents"] == 2000
 
 
 async def test_approval_flow_moves_ticket_to_refunded(
@@ -157,9 +206,8 @@ async def test_approval_flow_moves_ticket_to_refunded(
 ) -> None:
     order = await _seed_order(session)
     await api_client.post(f"/api/orders/{order.id}/pay")
-    await api_client.post(
-        "/api/tools/create_refund/invoke",
-        json={"arguments": {"order_id": order.id, "reason_code": "WRONG_ITEM"}},
+    await _create_pending_refund(
+        api_client, order.id, arguments={"order_id": order.id, "reason_code": "WRONG_ITEM"}
     )
 
     pending = await api_client.get("/api/tickets", params={"status": "PENDING"})
@@ -184,9 +232,8 @@ async def test_rejecting_a_refunded_ticket_returns_409(
 ) -> None:
     order = await _seed_order(session)
     await api_client.post(f"/api/orders/{order.id}/pay")
-    await api_client.post(
-        "/api/tools/create_refund/invoke",
-        json={"arguments": {"order_id": order.id, "reason_code": "WRONG_ITEM"}},
+    await _create_pending_refund(
+        api_client, order.id, arguments={"order_id": order.id, "reason_code": "WRONG_ITEM"}
     )
     tickets = (await api_client.get("/api/tickets")).json()["items"]
     ticket_id = tickets[0]["ticket_id"]
@@ -215,7 +262,11 @@ async def test_planner_draft_returns_structured_proposal(
     assert proposal["arguments"]["reason_code"] == "QUALITY_ISSUE"
     assert proposal["arguments"]["amount_cents"] == 8000
     assert proposal["risk_level"] == "high"
+    # 审批不再是规划器自己拍的:它转述策略引擎的裁决。
+    # 默认 actor 的信任等级是 L2,高风险退款在 L2 档必须人批。
     assert proposal["requires_approval"] is True
+    assert proposal["policy_decision"] == "REQUIRE_APPROVAL"
+    assert "L2" in proposal["policy_reason"]
     assert proposal["evidence"]
 
 

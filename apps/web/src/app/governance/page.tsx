@@ -137,6 +137,18 @@ function AuditCard({ entry }: { entry: AuditEntry }) {
         >
           {entry.outcome === "SUCCEEDED" ? "成功" : "失败"}
         </span>
+        {entry.policy_decision && (
+          <span
+            className={
+              entry.policy_decision === "ALLOW"
+                ? "rounded bg-sky-500/10 px-2 py-0.5 text-sky-300"
+                : "rounded bg-amber-500/10 px-2 py-0.5 text-amber-300"
+            }
+            title={entry.policy_reason ?? undefined}
+          >
+            策略 {entry.policy_decision}
+          </span>
+        )}
         <span className="text-neutral-500">actor={entry.actor}</span>
         <span className="text-neutral-500">
           run={(entry.run_uid ?? "-").slice(0, 8)} step={entry.step_seq ?? "-"}
@@ -148,6 +160,13 @@ function AuditCard({ entry }: { entry: AuditEntry }) {
       </header>
 
       {entry.reason && <p className="text-sm text-neutral-400">理由:{entry.reason}</p>}
+
+      {entry.policy_reason && (
+        <p className="text-xs text-neutral-500">
+          <span className="font-mono text-neutral-600">凭什么允许它写:</span>{" "}
+          {entry.policy_reason}
+        </p>
+      )}
 
       {changes.length > 0 ? (
         <ul className="space-y-1 font-mono text-xs">

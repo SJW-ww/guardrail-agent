@@ -43,7 +43,7 @@ class CreateRunRequest(BaseModel):
     steps: list[PlannedStepIn] = Field(default_factory=list)
     from_intent: bool = Field(
         default=False,
-        description="忽略 steps,由确定性规划器从 goal 生成一步计划(W3 才换成 LLM)",
+        description="忽略 steps,由规划器从 goal 生成一步计划(规则或 LLM,见 PLANNER_BACKEND)",
     )
 
 
@@ -144,7 +144,7 @@ async def _by_uid(session: AsyncSession, run_uid: str) -> AgentRun:
 @router.post("", response_model=RunDetail, summary="登记一次执行(此时无任何副作用)")
 async def create(body: CreateRunRequest, session: SessionDep, actor: ActorDep) -> RunDetail:
     if body.from_intent:
-        proposal = await draft(session, body.goal)
+        proposal = await draft(session, body.goal, actor=actor)
         steps = [
             PlannedStep(
                 seq=1,

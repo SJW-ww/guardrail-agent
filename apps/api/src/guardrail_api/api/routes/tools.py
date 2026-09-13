@@ -7,8 +7,9 @@
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from guardrail_api.api.deps import ActorDep
@@ -16,7 +17,7 @@ from guardrail_api.db import get_session, get_session_factory
 from guardrail_api.domain.errors import RuleViolation
 from guardrail_api.governance import trace
 from guardrail_api.governance.executor import PlannedStep, RunExecutor, create_run
-from guardrail_api.models import StepStatus
+from guardrail_api.models import AgentRun, RunStatus, StepStatus
 from guardrail_api.tools import ToolContext, load_tools, registry
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -52,6 +53,8 @@ class ToolInvocationResponse(BaseModel):
     result: dict[str, Any]
     # 写操作会顺带创建一条 run,便于在「执行与审计」里追溯
     run_uid: str | None = None
+    status: RunStatus | None = None
+    message: str | None = None
 
 
 INLINE_WORKER_ID = "api-tool-gateway"
@@ -64,7 +67,11 @@ async def list_tools() -> list[ToolDescription]:
 
 @router.post("/{tool_name}/invoke", response_model=ToolInvocationResponse, summary="调用工具")
 async def invoke_tool(
-    tool_name: str, body: InvokeToolRequest, session: SessionDep, actor: ActorDep
+    tool_name: str,
+    body: InvokeToolRequest,
+    response: Response,
+    session: SessionDep,
+    actor: ActorDep,
 ) -> ToolInvocationResponse:
     """所有写操作都必须走这里 —— 编排层、Agent、UI 共用同一条受治理的路径。
 
@@ -103,6 +110,32 @@ async def invoke_tool(
     execution = await executor.execute_run(run.run_uid)
 
     outcome = execution.outcomes[0] if execution.outcomes else None
+
+    # 策略层判了「要人批」:网关没有权力替审批人做决定,也不该假装这是一次失败。
+    # 如实返回 202 + run_uid,调用方去审批中心接着走。
+    if execution.status is RunStatus.WAITING_APPROVAL:
+        # expire_all() 之后不要再去碰 run 的任何属性 —— 那会触发一次同步懒加载,
+        # 在 async 上下文里直接炸 MissingGreenlet。主键先取出来。
+        run_uid = run.run_uid
+        session.expire_all()
+        fresh = await _by_uid(session, run_uid)
+        policy_info = (fresh.checkpoint or {}).get("policy") or {}
+        response.status_code = status.HTTP_202_ACCEPTED
+        return ToolInvocationResponse(
+            tool=tool_name,
+            actor=context.actor,
+            risk_level=spec.risk_level.value,
+            read_only=False,
+            side_effect=spec.side_effect,
+            result={},
+            run_uid=run_uid,
+            status=fresh.status,
+            message=(
+                f"该操作需人工审批,已登记执行记录 {run_uid}。"
+                f"原因:{policy_info.get('reason', '策略要求人工审批')}"
+            ),
+        )
+
     if outcome is None or outcome.status is not StepStatus.SUCCEEDED:
         # 领域错误原样抛出:HTTP 层才能给出字段级错误,而不是一句笼统的失败
         if outcome is not None and outcome.cause is not None:
@@ -117,4 +150,12 @@ async def invoke_tool(
         side_effect=spec.side_effect,
         result=outcome.result or {},
         run_uid=run.run_uid,
+        status=execution.status,
     )
+
+
+async def _by_uid(session: AsyncSession, run_uid: str) -> AgentRun:
+    run = await session.scalar(select(AgentRun).where(AgentRun.run_uid == run_uid))
+    if run is None:
+        raise RuleViolation(f"执行记录 {run_uid} 不存在")
+    return run

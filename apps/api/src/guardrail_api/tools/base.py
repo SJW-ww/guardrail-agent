@@ -66,6 +66,9 @@ class ToolSpec:
     compensate_tool: str | None = None
     snapshot: ToolSnapshot | None = None
     reason_field: str | None = None
+    # 声明「哪个参数是金额」。策略引擎据此套用额度(如 L4 单笔自主限额),
+    # 没声明的工具在需要额度判断时只能走人工审批 —— 不猜字段名。
+    amount_field: str | None = None
     tags: tuple[str, ...] = ()
 
     @property
@@ -89,6 +92,7 @@ class ToolSpec:
             # 让编排层/策略引擎知道这个工具能不能产出可读的审计 diff
             "audit_snapshot": self.snapshot is not None,
             "audit_reason_field": self.reason_field,
+            "amount_field": self.amount_field,
             "tags": list(self.tags),
         }
 

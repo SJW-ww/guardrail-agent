@@ -84,10 +84,13 @@ export function ConsoleClient() {
       setInvocation(result);
       const written = result.read_only
         ? "只读查询,未产生副作用"
-        : `已执行:${result.side_effect ?? "写操作"}`;
+        : result.status === "WAITING_APPROVAL"
+          ? "被策略引擎拦下:等人工审批,业务数据尚未改动"
+          : `已执行:${result.side_effect ?? "写操作"}`;
       setSteps((prev) => [
         ...prev,
         { label: "参数校验", detail: "JSON Schema 校验通过", status: "done" },
+        { label: "策略裁决", detail: result.message ?? "ALLOW", status: "done" },
         { label: "执行工具", detail: written, status: "done" },
       ]);
     } catch (cause) {
@@ -157,6 +160,16 @@ export function ConsoleClient() {
             )}
           </header>
 
+          {proposal.policy_reason && (
+            <p className="rounded-md border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-xs text-neutral-400">
+              <span className="font-mono text-neutral-500">
+                策略裁决 {proposal.policy_decision}
+              </span>
+              <span className="mx-2 text-neutral-700">|</span>
+              {proposal.policy_reason}
+            </p>
+          )}
+
           <dl className="grid gap-2 text-sm sm:grid-cols-2">
             {Object.entries(proposal.arguments).map(([key, value]) => (
               <div key={key} className="flex gap-2">
@@ -169,9 +182,9 @@ export function ConsoleClient() {
           </dl>
 
           <p className="text-sm text-neutral-300">{proposal.rationale}</p>
-          {proposal.evidence.length > 0 && (
+          {(proposal.evidence?.length ?? 0) > 0 && (
             <ul className="list-inside list-disc text-xs text-neutral-500">
-              {proposal.evidence.map((item) => (
+              {(proposal.evidence ?? []).map((item) => (
                 <li key={item}>{item}</li>
               ))}
             </ul>
@@ -183,7 +196,7 @@ export function ConsoleClient() {
             onClick={handleExecute}
             className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
           >
-            {busy === "execute" ? "执行中…" : "执行这条提议"}
+            {busy === "execute" ? "提交中…" : proposal.requires_approval ? "提交并等待审批" : "执行这条提议"}
           </button>
         </article>
       )}
@@ -194,16 +207,35 @@ export function ConsoleClient() {
             <h2 className="text-sm font-semibold text-neutral-200">执行结果</h2>
             <span className="font-mono text-xs text-neutral-500">actor={invocation.actor}</span>
           </header>
-          {typeof invocation.result.note === "string" && (
-            <p className="text-sm text-emerald-300">{invocation.result.note}</p>
-          )}
-          <pre className="max-h-72 overflow-auto rounded-md bg-neutral-950 p-3 font-mono text-xs text-neutral-400">
-            {JSON.stringify(invocation.result, null, 2)}
-          </pre>
-          {!invocation.read_only && (
-            <Link href="/approvals" className="inline-block text-sm text-emerald-400 hover:underline">
-              去审批中心处理这张工单 →
-            </Link>
+          {invocation.status === "WAITING_APPROVAL" ? (
+            <>
+              <p className="rounded-md border border-amber-900 bg-amber-950/30 px-3 py-2 text-sm text-amber-300">
+                {invocation.message}
+              </p>
+              <Link
+                href={`/governance/${invocation.run_uid}`}
+                className="inline-block text-sm text-emerald-400 hover:underline"
+              >
+                去执行详情审批这一步 →
+              </Link>
+            </>
+          ) : (
+            <>
+              {typeof invocation.result.note === "string" && (
+                <p className="text-sm text-emerald-300">{invocation.result.note}</p>
+              )}
+              <pre className="max-h-72 overflow-auto rounded-md bg-neutral-950 p-3 font-mono text-xs text-neutral-400">
+                {JSON.stringify(invocation.result, null, 2)}
+              </pre>
+              {!invocation.read_only && (
+                <Link
+                  href="/approvals"
+                  className="inline-block text-sm text-emerald-400 hover:underline"
+                >
+                  去审批中心处理这张工单 →
+                </Link>
+              )}
+            </>
           )}
         </article>
       )}
@@ -213,7 +245,7 @@ export function ConsoleClient() {
           <h2 className="text-sm font-semibold text-neutral-300">
             执行轨迹
             <span className="ml-2 font-mono text-xs font-normal text-neutral-500">
-              W2 接入 run/step 持久化后替换
+              每一步都落在 run / step 表里,可查可续跑
             </span>
           </h2>
           <ol className="space-y-1 font-mono text-xs">

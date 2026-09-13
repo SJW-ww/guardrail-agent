@@ -32,6 +32,8 @@ class AuditEntry(BaseModel):
     before: dict[str, Any] | None = None
     after: dict[str, Any] | None = None
     reason: str | None = None
+    policy_decision: str | None = None
+    policy_reason: str | None = None
     outcome: AuditOutcome
     created_at: datetime
 

@@ -38,7 +38,31 @@ async function pickRefundableOrder(request: APIRequestContext): Promise<OrderSum
   return target as OrderSummary;
 }
 
-test("提议 → 执行 → 审批 → 退款 全链路", async ({ page, request }) => {
+async function submitProposalAndApproveRun(page: import("@playwright/test").Page): Promise<string> {
+  // 提议卡片带着策略引擎的裁决 —— 点「提交」之前就该知道这条会被拦下来审批
+  await page.getByRole("button", { name: /提交并等待审批|执行这条提议/ }).click();
+  const result = page.locator("article", { hasText: "执行结果" });
+  await expect(result).toBeVisible();
+  await expect(result.getByText(/需人工审批/)).toBeVisible();
+
+  const runLink = result.getByRole("link", { name: /去执行详情审批这一步/ });
+  const href = await runLink.getAttribute("href");
+  expect(href, "等审批时要给出执行详情入口").toBeTruthy();
+  const runUid = (href as string).split("/").pop() as string;
+
+  // 策略层拦下来的写操作,业务表此时必须一行都没动
+  await page.goto(`/governance/${runUid}`);
+  await expect(page.getByText(/策略裁决 REQUIRE_APPROVAL/)).toBeVisible();
+  await page.getByRole("button", { name: /批准第 \d+ 步/ }).click();
+  await expect(page.getByRole("button", { name: /批准第 \d+ 步/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "推进执行" }).click();
+  // 终态下按钮会变成「已结束」,用它判断 run 真的推进完了
+  await expect(page.getByRole("button", { name: "已结束" })).toBeVisible();
+  return runUid;
+}
+
+test("提议 → 策略拦下 → 审批 → 执行 → 退款 全链路", async ({ page, request }) => {
   const order = await pickRefundableOrder(request);
 
   // --- 1. 操作台:生成提议 ---
@@ -48,29 +72,22 @@ test("提议 → 执行 → 审批 → 退款 全链路", async ({ page, request
 
   const proposal = page.locator("article", { hasText: "提议卡片" });
   await expect(proposal).toBeVisible();
-  await expect(proposal.getByText("create_refund")).toBeVisible();
-  await expect(proposal.getByText("需人工审批")).toBeVisible();
+  await expect(proposal.getByText("create_refund", { exact: true })).toBeVisible();
+  await expect(proposal.getByText("需人工审批", { exact: true })).toBeVisible();
+  await expect(proposal.getByText(/策略裁决 REQUIRE_APPROVAL/)).toBeVisible();
   await expect(proposal.getByText(/质量问题/)).toBeVisible();
   await expect(proposal.getByText("¥1.00")).toBeVisible();
+  await expect(page.getByText("参数校验")).toHaveCount(0); // 还没提交
 
-  // --- 2. 执行提议 ---
-  await page.getByRole("button", { name: "执行这条提议" }).click();
-  const result = page.locator("article", { hasText: "执行结果" });
-  await expect(result).toBeVisible();
-  // 收窄到 note 段落:JSON 里也有同名字段,不限定会触发 strict mode
-  await expect(result.locator("p").filter({ hasText: /已创建待审批退款工单/ })).toBeVisible();
+  // --- 2. 提交 → 被策略拦下 → 在执行详情里批准并推进 ---
+  await submitProposalAndApproveRun(page);
 
-  const payload = (await result.locator("pre").innerText()).trim();
-  const ticketNo = /"ticket_no":\s*"([^"]+)"/.exec(payload)?.[1];
-  expect(ticketNo, "执行结果里应该带工单号").toBeTruthy();
-
-  // 数据库真的变了:工单处于待审批
+  // 批准之后业务表才真的变了:工单处于待审批
   const created = await request.get(`${API}/api/tickets?status=PENDING&limit=50`);
-  const pending = (await created.json()) as { items: { ticket_no: string }[] };
-  expect(pending.items.map((item) => item.ticket_no)).toContain(ticketNo);
-
-  // 轨迹被记录
-  await expect(page.getByText("参数校验")).toBeVisible();
+  const pending = (await created.json()) as { items: { ticket_no: string; order_id: number }[] };
+  const ticket = pending.items.find((item) => item.order_id === order.order_id);
+  expect(ticket, "推进 run 之后应该落一张待审批工单").toBeTruthy();
+  const ticketNo = (ticket as { ticket_no: string }).ticket_no;
 
   // --- 3. 审批中心:批准并退款 ---
   await page.goto("/approvals");
@@ -104,18 +121,20 @@ test("已发货订单不允许取消,错误理由可见", async ({ page, request
 test("UI 点的写操作会进治理链路:审计里能看到 before/after", async ({ page, request }) => {
   const order = await pickRefundableOrder(request);
 
-  // 1. 在操作台执行一次写入(只读/写走的是同一条受治理路径)
+  // 1. 在操作台提交一次写入:网关→run→策略裁决,全程同一条受治理路径
   await page.goto("/console");
   await page.getByLabel("你想做什么").fill(`订单 ${order.order_no} 破损了,退 2 元`);
   await page.getByRole("button", { name: "生成提议" }).click();
-  await page.getByRole("button", { name: "执行这条提议" }).click();
-  await expect(page.locator("article", { hasText: "执行结果" })).toBeVisible();
+  await submitProposalAndApproveRun(page);
 
   // 2. 执行与审计看板:最新一条审计必须是这次写入,并且带前后值
   await page.goto("/governance");
   const latest = page.locator("article").filter({ hasText: "create_refund" }).first();
   await expect(latest).toBeVisible();
   await expect(latest.getByText("成功")).toBeVisible();
+  // 这一步是策略要求审批、人批了之后才执行的 —— 审计要能读出这两件事
+  await expect(latest.getByText(/策略 REQUIRE_APPROVAL/)).toBeVisible();
+  await expect(latest.getByText(/已获人工批准后执行/)).toBeVisible();
   // 订单在 seed 里可能已经有工单,所以新工单的下标不固定;
   // 断言收窄到那一行 diff,避免和「完整快照」里的原文冲突
   const change = latest.locator("li").filter({ hasText: /tickets\[\d+\]\.status/ });

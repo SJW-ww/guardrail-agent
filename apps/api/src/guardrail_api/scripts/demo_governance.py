@@ -20,6 +20,7 @@ import sys
 
 from sqlalchemy import func, select
 
+from guardrail_api.config import Settings
 from guardrail_api.db import dispose_engine, get_session_factory
 from guardrail_api.governance.executor import PlannedStep, RunExecutor, create_run
 from guardrail_api.models import (
@@ -34,6 +35,10 @@ from guardrail_api.models import (
 )
 
 WORKER = "guardrail_api.governance.worker"
+
+# 演示用的执行体授权:agent:demo 是 L4(额度内受限自主),见文件末尾的说明
+DEMO_ACTOR = "agent:demo"
+DEMO_ACTOR_LEVELS = f"{DEMO_ACTOR}=L4"
 
 #: 演示把租约压到 2 秒(生产默认 30 秒),否则「等租约过期」要等半分钟。
 #: 变的只是时长,语义完全一致:持租约才能推进,续不上就得让别人接管。
@@ -119,6 +124,10 @@ def run_worker(run_uid: str, worker_id: str, *extra: str) -> int:
             **os.environ,
             "LEASE_SECONDS": str(DEMO_LEASE_SECONDS),
             "HEARTBEAT_INTERVAL_SECONDS": "1",
+            # 这个演示要让退款真的自动跑起来,所以给它 L4:额度内受限自主。
+            # 换成默认的 L2,第一个 create_refund 就会规规矩矩地停下来等人批 ——
+            # 那是对的,但演示的是另一件事。
+            "POLICY_ACTOR_TRUST_LEVELS": DEMO_ACTOR_LEVELS,
         },
     )
     return result.returncode
@@ -133,7 +142,7 @@ async def main() -> None:
         run = await create_run(
             session,
             goal="演示:kill -9 之后从断点接着跑",
-            actor="agent:demo",
+            actor=DEMO_ACTOR,
             plan=[
                 PlannedStep(seq=1, tool="query_order", args={"order_id": first}),
                 PlannedStep(
@@ -183,7 +192,11 @@ async def main() -> None:
     await snapshot(factory, [first, second], run_uid)
 
     title("4. 对第 2 步重放 5 次:副作用不会发生第二次")
-    executor = RunExecutor(factory, worker_id="demo-replayer")
+    executor = RunExecutor(
+        factory,
+        worker_id="demo-replayer",
+        settings=Settings(policy_actor_trust_levels=DEMO_ACTOR_LEVELS),
+    )
     for index in range(5):
         outcome = await executor.retry_step(run_uid, 2)
         print(
@@ -225,6 +238,7 @@ async def main() -> None:
         return
     before, after = entry.before or {}, entry.after or {}
     print(f"  actor={entry.actor} reason={entry.reason} trace={entry.trace_id}")
+    print(f"  策略裁决={entry.policy_decision} 凭什么放行={entry.policy_reason}")
     before_count = len(before.get("tickets", []))
     after_count = len(after.get("tickets", []))
     print(f"  操作前工单数={before_count} → 操作后工单数={after_count}")

@@ -29,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from guardrail_api.config import Settings, get_settings
 from guardrail_api.domain.clock import utcnow
 from guardrail_api.domain.errors import DomainError, LeaseLost, RunBudgetExceeded
-from guardrail_api.governance import audit, idempotency, lease
+from guardrail_api.governance import audit, idempotency, lease, policy
+from guardrail_api.governance.policy import PolicyDecision, PolicyVerdict
 from guardrail_api.models import (
     AgentRun,
     AgentStep,
@@ -240,6 +241,7 @@ class RunExecutor:
                 completed = await self._completed_seqs(run.id)
                 approved = set(run.approved_seqs or [])
                 step_budget = run.step_budget
+                actor = run.actor
 
             if status.is_terminal:
                 result.status = status
@@ -261,12 +263,29 @@ class RunExecutor:
                 raise RunBudgetExceeded(message, run_uid=run_uid, step_budget=step_budget)
 
             step = remaining[0]
-            if step.requires_approval and step.seq not in approved:
-                await self._wait_for_approval(run_uid, step)
+            verdict = self._judge(step, actor=actor)
+
+            # 拒绝:一步都不碰业务表。但审计要留痕(见 _record_failure)——
+            # 「这次尝试被挡下来了」本身就是要存档的事实。
+            if verdict.decision is PolicyDecision.DENY:
+                message = f"策略引擎拒绝执行:{verdict.reason}"
+                await self._record_failure(run_uid, step, message, retryable=False, verdict=verdict)
+                await self._finish(run_uid, RunStatus.FAILED, error=message)
+                result.status = RunStatus.FAILED
+                return
+
+            # 审批门是「更严的那一个说了算」:计划里标了要审批的照旧要审批;
+            # 计划没标的,只要策略裁决要求审批,一样要审批。
+            # 换句话说,计划可以让审批更严,但没法让策略放行得更松。
+            needs_approval = step.requires_approval or verdict.decision is (
+                PolicyDecision.REQUIRE_APPROVAL
+            )
+            if needs_approval and step.seq not in approved:
+                await self._wait_for_approval(run_uid, step, verdict)
                 result.status = RunStatus.WAITING_APPROVAL
                 return
 
-            outcome = await self._execute_step(run_uid, step)
+            outcome = await self._execute_step(run_uid, step, verdict)
             result.outcomes.append(outcome)
             if outcome.status is StepStatus.FAILED:
                 async with self._sessions() as session:
@@ -288,6 +307,17 @@ class RunExecutor:
         step = await self._planned_step(run_uid, seq)
         spec = self.registry.get(step.tool)
 
+        # 人工重试本身视为对该步的确认,所以不再要求走一次审批;
+        # 但 DENY 是策略层的禁止,人工重试也不能把它点开。
+        verdict = self._judge(step, actor=await self._actor_of(run_uid))
+        if verdict.decision is PolicyDecision.DENY:
+            return StepOutcome(
+                seq=step.seq,
+                tool=step.tool,
+                status=StepStatus.FAILED,
+                error=f"策略引擎拒绝执行:{verdict.reason}",
+            )
+
         if not spec.is_read_only:
             key = idempotency.compute_key(run_uid=run_uid, tool_name=step.tool, arguments=step.args)
             async with self._sessions() as session:
@@ -295,7 +325,21 @@ class RunExecutor:
             if record is not None and record.status is IdempotencyStatus.SUCCEEDED:
                 logger.info("run=%s step=%d 命中幂等账本,复用历史结果", run_uid, seq)
 
-        return await self._execute_step(run_uid, step)
+        return await self._execute_step(run_uid, step, verdict)
+
+    def _judge(self, step: PlannedStep, *, actor: str) -> PolicyVerdict:
+        """按「工具声明 + 执行体信任等级」现算一次裁决。
+
+        刻意放在执行时而不是计划时:计划可能是几分钟前写的,而权限是现在生效的。
+        计划里冻结一个 ALLOW,等于给越权留了一个时间窗。
+        """
+        return policy.evaluate(
+            self.registry.get(step.tool), step.args, actor=actor, settings=self.settings
+        )
+
+    async def _actor_of(self, run_uid: str) -> str:
+        async with self._sessions() as session:
+            return (await self._load(session, run_uid)).actor
 
     async def _planned_step(self, run_uid: str, seq: int) -> PlannedStep:
         from guardrail_api.domain.errors import NotFound
@@ -307,7 +351,9 @@ class RunExecutor:
             raise NotFound(f"run {run_uid} 的计划里没有第 {seq} 步")
         return PlannedStep.from_dict(planned[seq])
 
-    async def _execute_step(self, run_uid: str, step: PlannedStep) -> StepOutcome:
+    async def _execute_step(
+        self, run_uid: str, step: PlannedStep, verdict: PolicyVerdict
+    ) -> StepOutcome:
         self._chaos(CHAOS_BEFORE_STEP_TXN, step.seq)
 
         spec = self.registry.get(step.tool)
@@ -324,6 +370,9 @@ class RunExecutor:
             try:
                 step_row = await self._open_step(session, run_id=run.id, step=step)
                 context = ToolContext(session=session, actor=run.actor, run_id=run.run_uid)
+                # 这一步是不是「策略要求审批、人批了之后才走到这」。
+                # 不记这一笔的话,审计里只留下一句"必须人工审批",读起来像是被拦住了。
+                approved_by_human = step.seq in set(run.approved_seqs or [])
 
                 claim = None
                 if key is not None:
@@ -364,6 +413,8 @@ class RunExecutor:
                             after=after,
                             reason=reason,
                             outcome=AuditOutcome.SUCCEEDED,
+                            policy_decision=verdict.decision.value,
+                            policy_reason=_policy_reason(verdict, approved_by_human),
                         )
                     await self._close_step(
                         session, step_row, result=payload, idempotency_key=key, replayed=False
@@ -388,7 +439,11 @@ class RunExecutor:
 
         message = getattr(failure, "message", None) or f"{type(failure).__name__}: {failure}"
         await self._record_failure(
-            run_uid, step, message, retryable=not isinstance(failure, DomainError)
+            run_uid,
+            step,
+            message,
+            retryable=not isinstance(failure, DomainError),
+            verdict=verdict,
         )
         if isinstance(failure, DomainError):
             return StepOutcome(
@@ -535,7 +590,13 @@ class RunExecutor:
         await session.flush()
 
     async def _record_failure(
-        self, run_uid: str, step: PlannedStep, message: str, *, retryable: bool
+        self,
+        run_uid: str,
+        step: PlannedStep,
+        message: str,
+        *,
+        retryable: bool,
+        verdict: PolicyVerdict | None = None,
     ) -> None:
         """失败留痕。失败也写审计 —— 只记成功等于把事故现场擦干净。"""
         spec = self.registry.get(step.tool)
@@ -561,6 +622,8 @@ class RunExecutor:
                     after=None,
                     reason=message,
                     outcome=AuditOutcome.FAILED,
+                    policy_decision=verdict.decision.value if verdict else None,
+                    policy_reason=verdict.reason if verdict else None,
                 )
 
             exhausted = run.attempt >= self.settings.max_step_retries
@@ -576,7 +639,10 @@ class RunExecutor:
                 run.finished_at = utcnow()
             await session.commit()
 
-    async def _wait_for_approval(self, run_uid: str, step: PlannedStep) -> None:
+    async def _wait_for_approval(
+        self, run_uid: str, step: PlannedStep, verdict: PolicyVerdict
+    ) -> None:
+        """挂起等人工。**把裁决理由一起存下来** —— 审批人要知道自己在批什么。"""
         async with self._sessions() as session:
             run = await self._load(session, run_uid)
             run.status = RunStatus.WAITING_APPROVAL
@@ -584,8 +650,12 @@ class RunExecutor:
             run.checkpoint = {
                 "seq": run.checkpoint_seq,
                 "waiting_for": step.to_dict(),
+                "policy": verdict.to_dict(),
                 "at": utcnow().isoformat(),
             }
+            # **等审批不等于在执行,不能占着租约。** 占着的话审批人点完「批准」之后
+            # 没有任何 worker 能领取它,得干等租约过期 —— 一个纯人造的 30 秒延迟。
+            await lease.release(session, run_uid=run_uid, worker_id=self.worker_id)
             await session.commit()
 
     async def _finish(
@@ -652,6 +722,13 @@ class RunExecutor:
     def _chaos(self, event: str, seq: int) -> None:
         if self.chaos is not None:
             self.chaos(event, seq)
+
+
+def _policy_reason(verdict: PolicyVerdict, approved_by_human: bool) -> str:
+    """审计里的裁决理由。人工批准过就补一句 —— 否则读起来像"被拦住了",而它其实执行了。"""
+    if approved_by_human:
+        return f"{verdict.reason};该操作已获人工批准后执行"
+    return verdict.reason
 
 
 def _digest(payload: dict[str, Any] | None) -> str | None:

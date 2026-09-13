@@ -8,6 +8,27 @@ import { formatCents, formatDateTime } from "@/lib/format";
 
 import { RunActions } from "./run-actions";
 
+type PolicyInfo = {
+  decision: string;
+  rule: string;
+  reason: string;
+  trust_level: string;
+};
+
+/** checkpoint.policy 是策略引擎挂起这一步时写下的裁决 —— 审批人要先看到理由。 */
+function readPolicy(checkpoint: Record<string, unknown> | null | undefined): PolicyInfo | null {
+  const raw = checkpoint?.policy;
+  if (!raw || typeof raw !== "object") return null;
+  const policy = raw as Record<string, unknown>;
+  if (typeof policy.reason !== "string") return null;
+  return {
+    decision: String(policy.decision ?? ""),
+    rule: String(policy.rule ?? ""),
+    reason: policy.reason,
+    trust_level: String(policy.trust_level ?? ""),
+  };
+}
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runUid: string }> }) {
   const { runUid } = await params;
 
@@ -18,6 +39,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
     const waitingSeq = run.waiting_ref?.startsWith("step:")
       ? Number(run.waiting_ref.split(":")[1])
       : null;
+    const policy = readPolicy(run.checkpoint);
 
     return (
       <div className="space-y-6">
@@ -34,6 +56,17 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
             </p>
           )}
         </section>
+
+        {policy && (
+          <section className="space-y-1 rounded-lg border border-amber-900/60 bg-amber-950/20 px-4 py-3">
+            <p className="text-xs font-mono text-amber-400">
+              策略裁决 {policy.decision}
+              {policy.trust_level && ` · 执行体信任等级 ${policy.trust_level}`}
+              {policy.rule && ` · 规则 ${policy.rule}`}
+            </p>
+            <p className="text-sm text-amber-200/90">{policy.reason}</p>
+          </section>
+        )}
 
         <RunActions
           runUid={run.run_uid}
@@ -102,6 +135,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
                 <span>{formatDateTime(entry.created_at)}</span>
               </header>
               {entry.reason && <p className="text-sm text-neutral-400">理由:{entry.reason}</p>}
+              {entry.policy_reason && (
+                <p className="text-xs text-neutral-500">
+                  <span className="font-mono text-neutral-600">
+                    策略 {entry.policy_decision}:
+                  </span>{" "}
+                  {entry.policy_reason}
+                </p>
+              )}
               <ul className="space-y-1 font-mono text-xs">
                 {diffSnapshots(entry.before ?? {}, entry.after ?? {}).map((change) => (
                   <li key={change.path} className="flex flex-wrap items-baseline gap-2">

@@ -754,16 +754,35 @@
           "planner"
         ],
         "summary": "生成提议(不执行)",
+        "description": "生成提议,但**不执行**。返回里带策略引擎的裁决与理由 —— 提议卡片要能解释自己。",
         "operationId": "draft_proposal_api_planner_draft_post",
+        "parameters": [
+          {
+            "name": "x-actor",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Actor"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/DraftProposalRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -1369,6 +1388,28 @@
             ],
             "title": "Reason"
           },
+          "policy_decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Decision"
+          },
+          "policy_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Reason"
+          },
           "outcome": {
             "$ref": "#/components/schemas/AuditOutcome"
           },
@@ -1464,7 +1505,7 @@
           "from_intent": {
             "type": "boolean",
             "title": "From Intent",
-            "description": "忽略 steps,由确定性规划器从 goal 生成一步计划(W3 才换成 LLM)",
+            "description": "忽略 steps,由规划器从 goal 生成一步计划(规则或 LLM,见 PLANNER_BACKEND)",
             "default": false
           }
         },
@@ -1876,13 +1917,13 @@
           "action": {
             "type": "string",
             "title": "Action",
-            "description": "要调用的工具名"
+            "description": "要调用的工具名,必须在工具清单内"
           },
           "arguments": {
             "additionalProperties": true,
             "type": "object",
             "title": "Arguments",
-            "description": "工具入参"
+            "description": "工具入参,必须满足该工具的 JSON Schema"
           },
           "rationale": {
             "type": "string",
@@ -1897,20 +1938,46 @@
             "title": "Evidence",
             "description": "依据的事实"
           },
-          "risk_level": {
-            "type": "string",
-            "title": "Risk Level"
-          },
-          "requires_approval": {
-            "type": "boolean",
-            "title": "Requires Approval",
-            "description": "是否必须人工审批后才执行"
-          },
           "confidence": {
             "type": "number",
             "maximum": 1.0,
             "minimum": 0.0,
-            "title": "Confidence"
+            "title": "Confidence",
+            "description": "规划器对这条提议的把握程度"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level",
+            "description": "工具声明的风险等级,由系统填写",
+            "default": ""
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "description": "规划器是否**额外**要求人工审批;最终要不要人批,由策略引擎在执行时裁决",
+            "default": false
+          },
+          "planner": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "llm"
+            ],
+            "title": "Planner",
+            "description": "这条提议出自哪条规划链路",
+            "default": "deterministic"
+          },
+          "policy_decision": {
+            "type": "string",
+            "title": "Policy Decision",
+            "description": "策略引擎裁决:ALLOW / REQUIRE_APPROVAL",
+            "default": ""
+          },
+          "policy_reason": {
+            "type": "string",
+            "title": "Policy Reason",
+            "description": "裁决理由,给审批人看",
+            "default": ""
           }
         },
         "type": "object",
@@ -1918,13 +1985,10 @@
           "action",
           "arguments",
           "rationale",
-          "evidence",
-          "risk_level",
-          "requires_approval",
           "confidence"
         ],
         "title": "Proposal",
-        "description": "模型唯一被允许的输出形态:结构化提议,不是 SQL,也不是自由文本。"
+        "description": "一条可校验、可展示、可审批的提议。"
       },
       "ReadyResponse": {
         "properties": {
@@ -2689,6 +2753,27 @@
               }
             ],
             "title": "Run Uid"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
           }
         },
         "type": "object",

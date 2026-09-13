@@ -179,6 +179,12 @@ class AuditLog(Base):
     before: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     after: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     reason: Mapped[str | None] = mapped_column(Text)
+
+    # 这次写操作是在什么裁决下发生的。事后复盘要答的是「当时凭什么允许它写」,
+    # 只记「它写了什么」答不了这个问题。
+    policy_decision: Mapped[str | None] = mapped_column(String(24))
+    policy_reason: Mapped[str | None] = mapped_column(Text)
+
     outcome: Mapped[AuditOutcome] = mapped_column(
         enum_column(AuditOutcome, "audit_outcome"), nullable=False
     )

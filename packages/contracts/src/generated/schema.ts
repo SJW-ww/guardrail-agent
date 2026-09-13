@@ -274,7 +274,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 生成提议(不执行) */
+        /**
+         * 生成提议(不执行)
+         * @description 生成提议,但**不执行**。返回里带策略引擎的裁决与理由 —— 提议卡片要能解释自己。
+         */
         post: operations["draft_proposal_api_planner_draft_post"];
         delete?: never;
         options?: never;
@@ -436,6 +439,10 @@ export interface components {
             } | null;
             /** Reason */
             reason?: string | null;
+            /** Policy Decision */
+            policy_decision?: string | null;
+            /** Policy Reason */
+            policy_reason?: string | null;
             outcome: components["schemas"]["AuditOutcome"];
             /**
              * Created At
@@ -475,7 +482,7 @@ export interface components {
             steps?: components["schemas"]["PlannedStepIn"][];
             /**
              * From Intent
-             * @description 忽略 steps,由确定性规划器从 goal 生成一步计划(W3 才换成 LLM)
+             * @description 忽略 steps,由规划器从 goal 生成一步计划(规则或 LLM,见 PLANNER_BACKEND)
              * @default false
              */
             from_intent: boolean;
@@ -631,17 +638,17 @@ export interface components {
         };
         /**
          * Proposal
-         * @description 模型唯一被允许的输出形态:结构化提议,不是 SQL,也不是自由文本。
+         * @description 一条可校验、可展示、可审批的提议。
          */
         Proposal: {
             /**
              * Action
-             * @description 要调用的工具名
+             * @description 要调用的工具名,必须在工具清单内
              */
             action: string;
             /**
              * Arguments
-             * @description 工具入参
+             * @description 工具入参,必须满足该工具的 JSON Schema
              */
             arguments: {
                 [key: string]: unknown;
@@ -655,16 +662,43 @@ export interface components {
              * Evidence
              * @description 依据的事实
              */
-            evidence: string[];
-            /** Risk Level */
+            evidence?: string[];
+            /**
+             * Confidence
+             * @description 规划器对这条提议的把握程度
+             */
+            confidence: number;
+            /**
+             * Risk Level
+             * @description 工具声明的风险等级,由系统填写
+             * @default
+             */
             risk_level: string;
             /**
              * Requires Approval
-             * @description 是否必须人工审批后才执行
+             * @description 规划器是否**额外**要求人工审批;最终要不要人批,由策略引擎在执行时裁决
+             * @default false
              */
             requires_approval: boolean;
-            /** Confidence */
-            confidence: number;
+            /**
+             * Planner
+             * @description 这条提议出自哪条规划链路
+             * @default deterministic
+             * @enum {string}
+             */
+            planner: "deterministic" | "llm";
+            /**
+             * Policy Decision
+             * @description 策略引擎裁决:ALLOW / REQUIRE_APPROVAL
+             * @default
+             */
+            policy_decision: string;
+            /**
+             * Policy Reason
+             * @description 裁决理由,给审批人看
+             * @default
+             */
+            policy_reason: string;
         };
         /** ReadyResponse */
         ReadyResponse: {
@@ -932,6 +966,9 @@ export interface components {
             };
             /** Run Uid */
             run_uid?: string | null;
+            status?: components["schemas"]["RunStatus"] | null;
+            /** Message */
+            message?: string | null;
         };
         /** ValidationError */
         ValidationError: {
@@ -1416,7 +1453,9 @@ export interface operations {
     draft_proposal_api_planner_draft_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-actor"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };

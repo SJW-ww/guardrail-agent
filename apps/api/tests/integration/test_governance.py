@@ -19,6 +19,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from guardrail_api.config import Settings
 from guardrail_api.domain.clock import utcnow
 from guardrail_api.governance import lease
 from guardrail_api.governance.audit_ddl import AUDIT_GUARD_UPGRADE
@@ -43,6 +44,11 @@ pytestmark = pytest.mark.integration
 
 ADDRESS = Address(receiver_name="张三", receiver_phone="13800000000", address="深圳市南山区 1 号")
 WORKER_ID = "test-worker"
+
+# 这一组用例验证的是幂等 / 续跑 / 审计这些**机制本身**,需要一个能自动执行高风险步骤的
+# 执行体。接上策略引擎之后,「能不能自动执行」不再由计划里的布尔值决定,而是由执行体的
+# 信任等级决定 —— 所以这里显式授权 L4,而不是把用例改成期望「卡在审批」。
+L4_SETTINGS = Settings(policy_actor_trust_levels="agent:guardrail=L4")
 
 
 # ---------------- 夹具 ----------------
@@ -126,7 +132,7 @@ async def test_replay_ten_times_produces_one_side_effect(session: AsyncSession, 
     await session.commit()
     run_uid = await _seed_run(session, plan=[_refund_step(1, order.id)])
 
-    executor = RunExecutor(factory, worker_id=WORKER_ID)
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
     outcomes = [await executor.retry_step(run_uid, 1) for _ in range(10)]
 
     assert all(outcome.status is StepStatus.SUCCEEDED for outcome in outcomes)
@@ -150,8 +156,8 @@ async def test_concurrent_same_key_only_one_wins(session: AsyncSession, factory)
     run_uid = await _seed_run(session, plan=[_refund_step(1, order.id)])
 
     first, second = await asyncio.gather(
-        RunExecutor(factory, worker_id="w-a").retry_step(run_uid, 1),
-        RunExecutor(factory, worker_id="w-b").retry_step(run_uid, 1),
+        RunExecutor(factory, settings=L4_SETTINGS, worker_id="w-a").retry_step(run_uid, 1),
+        RunExecutor(factory, settings=L4_SETTINGS, worker_id="w-b").retry_step(run_uid, 1),
     )
 
     assert first.result["ticket_no"] == second.result["ticket_no"], "两边拿到同一张工单"
@@ -172,6 +178,7 @@ async def _run_worker(
         "APP_ENV": "test",
         "LEASE_SECONDS": str(lease_seconds),
         "HEARTBEAT_INTERVAL_SECONDS": "1",
+        "POLICY_ACTOR_TRUST_LEVELS": "agent:guardrail=L4",
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -315,7 +322,7 @@ async def test_retrying_an_earlier_step_does_not_rewind_checkpoint(
         ],
     )
 
-    executor = RunExecutor(factory, worker_id=WORKER_ID)
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
     assert await executor.claim(run_uid)
     await executor.execute_run(run_uid)
 
@@ -392,7 +399,7 @@ async def test_audit_records_before_after_and_is_append_only(
     await session.commit()
     run_uid = await _seed_run(session, plan=[_refund_step(1, order.id, description="运输破损")])
 
-    executor = RunExecutor(factory, worker_id=WORKER_ID)
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
     assert await executor.claim(run_uid)
     await executor.execute_run(run_uid)
 
@@ -417,3 +424,133 @@ async def test_audit_records_before_after_and_is_append_only(
 
     with pytest.raises(DBAPIError):
         await session.execute(text("DELETE FROM audit_log"))
+
+
+# ---------------- 6. 策略裁决 ----------------
+
+
+async def _run_of(session: AsyncSession, run_uid: str) -> AgentRun:
+    return (await session.execute(select(AgentRun).where(AgentRun.run_uid == run_uid))).scalar_one()
+
+
+async def test_default_level_escalates_high_risk_and_blocks_before_writing(
+    session: AsyncSession, factory
+) -> None:
+    """默认信任等级(未授权任何 actor)下,高风险退款必须先审批。
+
+    关键断言不是「状态是等审批」,而是**审批之前业务表一行都没多** ——
+    护栏要是只在状态机上有,那它就是个装饰。
+    """
+    order = await _paid_order(session, order_no="SO2026005001")
+    await session.commit()
+    run_uid = await _seed_run(session, plan=[_refund_step(1, order.id)])
+
+    executor = RunExecutor(factory, worker_id=WORKER_ID)  # 不带 L4 授权
+    assert await executor.claim(run_uid)
+    result = await executor.execute_run(run_uid)
+
+    assert result.status is RunStatus.WAITING_APPROVAL
+    assert await _ticket_count(session, order.id) == 0, "没审批之前不许写业务表"
+
+    session.expire_all()
+    run = await _run_of(session, run_uid)
+    assert run.checkpoint is not None
+    assert run.checkpoint["policy"]["decision"] == "REQUIRE_APPROVAL"
+    assert run.checkpoint["policy"]["rule"] == "high_risk_requires_approval"
+    assert "必须人工审批" in run.checkpoint["policy"]["reason"]
+    assert run.approved_seqs == []
+
+
+async def test_approved_step_resumes_and_executes(session: AsyncSession, factory) -> None:
+    """批准之后同一个 run 继续跑完 —— 裁决是 REQUIRE_APPROVAL 不等于永远不能执行。"""
+    order = await _paid_order(session, order_no="SO2026005002")
+    order_id = order.id
+    await session.commit()
+    run_uid = await _seed_run(session, plan=[_refund_step(1, order_id)])
+
+    executor = RunExecutor(factory, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    await executor.execute_run(run_uid)
+
+    session.expire_all()
+    run = await _run_of(session, run_uid)
+    assert run.lease_owner is None, "等审批时不该占着租约,否则审批通过后没人能推进它"
+    run.approved_seqs = [1]
+    run.status = RunStatus.PENDING
+    await session.commit()
+
+    # 批准之后重新领取 —— 这正是真实链路里 worker / 内联执行走的动作
+    assert await executor.claim(run_uid)
+    result = await executor.execute_run(run_uid)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert await _ticket_count(session, order_id) == 1
+
+    # 审计不仅要记下"策略要求审批",还要记下"这一步确实是被批过才执行的"
+    session.expire_all()
+    entry = (await session.execute(select(AuditLog))).scalar_one()
+    assert entry.policy_decision == "REQUIRE_APPROVAL"
+    assert "已获人工批准后执行" in (entry.policy_reason or "")
+
+
+async def test_l0_executor_is_denied_and_the_denial_is_audited(
+    session: AsyncSession, factory
+) -> None:
+    """只读档的执行体想写:拒绝 + 留痕。被拒绝的尝试也是事实,不能只在日志里。"""
+    order = await _paid_order(session, order_no="SO2026005003")
+    await session.commit()
+    run_uid = await _seed_run(session, plan=[_refund_step(1, order.id)])
+
+    read_only = Settings(policy_actor_trust_levels="agent:guardrail=L0")
+    executor = RunExecutor(factory, settings=read_only, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    result = await executor.execute_run(run_uid)
+
+    assert result.status is RunStatus.FAILED
+    assert await _ticket_count(session, order.id) == 0
+
+    session.expire_all()
+    run = await _run_of(session, run_uid)
+    assert run.last_error is not None
+    assert "策略引擎拒绝执行" in run.last_error
+
+    entry = (await session.execute(select(AuditLog))).scalar_one()
+    assert entry.outcome.value == "FAILED"
+    assert entry.policy_decision == "DENY"
+    assert "L0" in (entry.policy_reason or "")
+
+
+async def test_executed_step_audit_carries_the_allow_verdict(
+    session: AsyncSession, factory
+) -> None:
+    """放行也要留理由:L4 为什么能自动执行,审计行里要答得出来。"""
+    order = await _paid_order(session, order_no="SO2026005004")
+    await session.commit()
+    run_uid = await _seed_run(session, plan=[_refund_step(1, order.id)])
+
+    executor = RunExecutor(factory, settings=L4_SETTINGS, worker_id=WORKER_ID)
+    assert await executor.claim(run_uid)
+    await executor.execute_run(run_uid)
+
+    session.expire_all()
+    entry = (await session.execute(select(AuditLog))).scalar_one()
+
+    assert entry.policy_decision == "ALLOW"
+    assert entry.policy_reason is not None
+    assert "L4" in entry.policy_reason
+    assert "额度" in entry.policy_reason
+
+
+async def test_retry_cannot_open_a_denied_step(session: AsyncSession, factory) -> None:
+    """人工重试不等于人工越权:DENY 的步骤点几次重试都还是拒绝。"""
+    order = await _paid_order(session, order_no="SO2026005005")
+    await session.commit()
+    run_uid = await _seed_run(session, plan=[_refund_step(1, order.id)])
+
+    read_only = Settings(policy_actor_trust_levels="agent:guardrail=L0")
+    executor = RunExecutor(factory, settings=read_only, worker_id=WORKER_ID)
+    outcome = await executor.retry_step(run_uid, 1)
+
+    assert outcome.status is StepStatus.FAILED
+    assert "策略引擎拒绝执行" in (outcome.error or "")
+    assert await _ticket_count(session, order.id) == 0

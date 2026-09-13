@@ -28,6 +28,8 @@ async def append(
     after: dict[str, Any] | None,
     reason: str | None,
     outcome: AuditOutcome,
+    policy_decision: str | None = None,
+    policy_reason: str | None = None,
 ) -> AuditLog:
     entry = AuditLog(
         trace_id=trace_id,
@@ -41,6 +43,8 @@ async def append(
         after=after,
         reason=reason,
         outcome=outcome,
+        policy_decision=policy_decision,
+        policy_reason=policy_reason,
     )
     session.add(entry)
     await session.flush()

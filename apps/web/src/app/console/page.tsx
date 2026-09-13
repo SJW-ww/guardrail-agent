@@ -20,9 +20,10 @@ export default async function ConsolePage() {
       <section className="space-y-2">
         <h1 className="text-xl font-semibold">Agent 操作台</h1>
         <p className="max-w-3xl text-sm leading-relaxed text-neutral-400">
-          当前是 <span className="font-mono text-emerald-400">L1 建议模式</span>
-          :系统只生成结构化提议并由人点击执行,模型拿不到数据库执行权。
-          提议由确定性规划器产出(W3 换成 LLM 时,这条链路不变)。
+          模型只产出<span className="text-neutral-200">结构化提议</span>
+          ,拿不到数据库执行权;<span className="text-neutral-200">要不要执行、要不要人批</span>
+          由策略引擎按工具风险与执行体信任等级裁决。高风险操作点下去不会立刻落库,
+          而是进审批队列 —— 审批通过前业务表一个字节都不会变。
         </p>
       </section>
 

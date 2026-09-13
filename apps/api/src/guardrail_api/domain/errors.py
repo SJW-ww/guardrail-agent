@@ -51,3 +51,25 @@ class RunBudgetExceeded(DomainError):
     """超出步骤/Token 预算。这不是失败,是拒绝继续 —— 剩下的需要人来判断。"""
 
     code = "run_budget_exceeded"
+
+
+class PlannerUnavailable(DomainError):
+    """规划器不可用(模型服务超时 / 没配凭据)。
+
+    刻意**不静默降级**到规则规划器:审计里写着"模型提议",实际却是规则拼出来的,
+    这种记录比没有记录更糟。宁可这次请求失败,也不要一条说谎的审计。
+    """
+
+    code = "planner_unavailable"
+
+
+class ProposalRejected(DomainError):
+    """模型输出反复不合规。context["attempts"] 记录试了几次、每次错在哪。"""
+
+    code = "proposal_rejected"
+
+
+class PolicyDenied(DomainError):
+    """策略引擎拒绝了这次操作。context 里带 rule,便于前端与复盘定位是哪条规则。"""
+
+    code = "policy_denied"

@@ -30,6 +30,11 @@ STATUS_BY_ERROR_CODE = {
     "invalid_tool_arguments": 422,
     "lease_lost": 409,
     "run_budget_exceeded": 422,
+    "proposal_rejected": 422,
+    # 规划器不可用是**服务端问题**,不是用户把话说错了 —— 所以不是 4xx
+    "planner_unavailable": 503,
+    # 不是「你说错了」,是「你不能做这件事」
+    "policy_denied": 403,
 }
 DEFAULT_ERROR_STATUS = 400
 

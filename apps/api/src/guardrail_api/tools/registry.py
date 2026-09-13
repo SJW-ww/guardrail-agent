@@ -150,6 +150,7 @@ def register(
     compensate_tool: str | None = None,
     snapshot: ToolSnapshot | None = None,
     reason_field: str | None = None,
+    amount_field: str | None = None,
     tags: tuple[str, ...] = (),
 ) -> Any:
     """把一个 async 函数注册成领域工具。"""
@@ -171,6 +172,7 @@ def register(
                 compensate_tool=compensate_tool,
                 snapshot=snapshot,
                 reason_field=reason_field,
+                amount_field=amount_field,
                 tags=tags,
             )
         )
