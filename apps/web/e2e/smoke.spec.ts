@@ -142,3 +142,52 @@ test("UI 点的写操作会进治理链路:审计里能看到 before/after", asy
   await expect(change).toContainText("—"); // 前值为空:这条工单是这次操作新增的
   await expect(change).toContainText("PENDING");
 });
+
+test("大额退款要两个不同身份签字,签够之前业务表一行不动", async ({ page, request }) => {
+  // 不传金额 = 全额退款,所以挑一张金额超过双人复核阈值的订单
+  const ordersResponse = await request.get(`${API}/api/orders?status=PAID&limit=100`);
+  const orders = (await ordersResponse.json()) as { items: OrderSummary[] };
+  const ticketsResponse = await request.get(`${API}/api/tickets?limit=100`);
+  const tickets = (await ticketsResponse.json()) as { items: TicketSummary[] };
+  // 有过任何工单的订单都不选:可退额度可能已经被占,金额就不好判断了
+  const touched = new Set(tickets.items.map((ticket) => ticket.order_id));
+  const order = orders.items.find(
+    (item) => !touched.has(item.order_id) && item.total_amount_cents > 10_000,
+  );
+  expect(order, "需要一张大额已支付订单,请先执行 make seed-reset").toBeTruthy();
+  const target = order as OrderSummary;
+
+  // 网关提交:策略层算出来要两个不同角色的签名
+  const invoked = await request.post(`${API}/api/tools/create_refund/invoke`, {
+    data: { arguments: { order_id: target.order_id, reason_code: "QUALITY_ISSUE" } },
+    headers: { "X-Actor": "operator-07" },
+  });
+  expect(invoked.status()).toBe(202);
+  const runUid = ((await invoked.json()) as { run_uid: string }).run_uid;
+
+  await page.goto(`/governance/${runUid}`);
+  await expect(page.getByText(/要求 2 人复核/)).toBeVisible();
+
+  // 第一票:进度变成「还差 1 人」,而不是直接放行
+  await page.getByRole("button", { name: /批准第 1 步/ }).click();
+  await expect(page.getByRole("button", { name: /还差 1 人/ })).toBeVisible();
+
+  // 没签够之前,业务表一行都不该多
+  const midway = await request.get(`${API}/api/tickets?limit=100`);
+  const midwayTickets = (await midway.json()) as { items: TicketSummary[] };
+  expect(midwayTickets.items.filter((item) => item.order_id === target.order_id)).toHaveLength(0);
+
+  // 第二票:换个身份才签得齐
+  await page.getByLabel("审批人身份").selectOption("finance-01");
+  await page.getByRole("button", { name: /批准第 1 步/ }).click();
+  await expect(page.getByRole("button", { name: /还差 1 人/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "推进执行" }).click();
+  await expect(page.getByRole("button", { name: "已结束" })).toBeVisible();
+
+  // 签够之后才真的落一张工单,金额是订单的可退全额
+  const created = await request.get(`${API}/api/tickets?status=PENDING&limit=100`);
+  const pending = (await created.json()) as { items: TicketSummary[] };
+  const ticket = pending.items.find((item) => item.order_id === target.order_id);
+  expect(ticket, "两个人都签完之后才允许写业务表").toBeTruthy();
+});

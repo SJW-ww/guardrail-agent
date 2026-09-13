@@ -49,6 +49,11 @@ ToolHandler = Callable[[ToolContext, Any], Awaitable[BaseModel]]
 # 审计表里不该出现和这次操作无关的字段,否则没人看得懂 diff。
 ToolSnapshot = Callable[[ToolContext, Any], Awaitable[dict[str, Any]]]
 
+# 金额解析:有些工具的金额可以不传(例如 create_refund 不传 = 全额退款),
+# 此时「这次操作要动多少钱」只有工具自己知道 —— 策略引擎据此决定要不要双人复核。
+# 拿不到就返回 None,调用方按「金额未知从严」处理,绝不当成 0。
+AmountResolver = Callable[[ToolContext, Any], Awaitable[int | None]]
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -69,6 +74,9 @@ class ToolSpec:
     # 声明「哪个参数是金额」。策略引擎据此套用额度(如 L4 单笔自主限额),
     # 没声明的工具在需要额度判断时只能走人工审批 —— 不猜字段名。
     amount_field: str | None = None
+    # 参数里没给金额时,由工具自己按业务规则算出实际生效的金额。
+    # 不声明就当作「金额未知」,从严审批 —— 猜一个数字比按未知处理更危险。
+    amount_resolver: AmountResolver | None = None
     tags: tuple[str, ...] = ()
 
     @property

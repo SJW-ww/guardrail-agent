@@ -5,14 +5,17 @@
 """
 
 import importlib
+import logging
 import pkgutil
 from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from guardrail_api.domain.errors import NotFound, ToolArgumentError
+from guardrail_api.domain.errors import DomainError, NotFound, ToolArgumentError
 from guardrail_api.tools.base import (
+    AmountResolver,
     RiskLevel,
     ToolContext,
     ToolHandler,
@@ -21,6 +24,8 @@ from guardrail_api.tools.base import (
 )
 
 _SKIP_MODULES = frozenset({"base", "registry"})
+
+logger = logging.getLogger("guardrail.tools")
 
 
 class ToolRegistry:
@@ -135,6 +140,50 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
+async def resolve_effective_amount(
+    spec: ToolSpec,
+    arguments: Mapping[str, Any],
+    *,
+    actor: str,
+    session: AsyncSession,
+) -> int | None:
+    """这次工具调用**实际会动多少钱**。
+
+    为什么不让策略引擎自己看参数:因为参数会说谎。`create_refund` 不传金额就是
+    「全额退款」,金额在订单里而不在参数里 —— 只看参数会把一笔大额退款当成
+    「金额未知」,或者反过来把「不传」当成 0 直接放行。
+
+    所以口径只有一个:优先取参数,参数没给就问工具自己(它可以去查库)。
+    查不出来(参数不合法 / 业务上算不出)返回 None,由策略按「金额未知从严」处理。
+    """
+    if spec.amount_field is None:
+        return None
+
+    raw = arguments.get(spec.amount_field)
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    if spec.amount_resolver is None:
+        return None
+
+    try:
+        params = spec.params_model.model_validate(dict(arguments))
+    except ValidationError:
+        # 参数不合法不是这里该报的错 —— 执行器会给出字段级错误,这里只负责"算不出金额"
+        return None
+
+    context = ToolContext(session=session, actor=actor)
+    try:
+        amount = await spec.amount_resolver(context, params)
+    except DomainError as exc:
+        logger.warning("工具 %s 的金额解析失败,按金额未知处理(从严审批):%s", spec.name, exc)
+        return None
+    return None if amount is None else int(amount)
+
+
 def register(
     *,
     name: str,
@@ -151,6 +200,7 @@ def register(
     snapshot: ToolSnapshot | None = None,
     reason_field: str | None = None,
     amount_field: str | None = None,
+    amount_resolver: AmountResolver | None = None,
     tags: tuple[str, ...] = (),
 ) -> Any:
     """把一个 async 函数注册成领域工具。"""
@@ -173,6 +223,7 @@ def register(
                 snapshot=snapshot,
                 reason_field=reason_field,
                 amount_field=amount_field,
+                amount_resolver=amount_resolver,
                 tags=tags,
             )
         )

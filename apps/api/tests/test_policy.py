@@ -10,6 +10,7 @@ from guardrail_api.config import Settings
 from guardrail_api.domain.trust import TrustLevel
 from guardrail_api.governance.policy import (
     PolicyDecision,
+    approval_requirement,
     evaluate,
     evaluate_approval,
     parse_actor_levels,
@@ -162,3 +163,94 @@ def test_a_different_human_can_approve() -> None:
 
     assert verdict.decision is PolicyDecision.ALLOW
     assert "supervisor-01" in verdict.reason
+
+
+# ---------- 双人复核:几个签字才算数 ----------
+
+
+def _requirement(arguments: dict, **overrides: object):
+    return approval_requirement(
+        load_tools().get("create_refund"),
+        arguments,
+        settings=Settings(**overrides),  # type: ignore[arg-type]
+    )
+
+
+def test_small_amount_needs_one_signature() -> None:
+    assert _requirement(REFUND_ARGS).required == 1
+
+
+def test_large_amount_needs_two_signatures() -> None:
+    requirement = _requirement({"order_id": 1, "amount_cents": 50_000})
+
+    assert requirement.required == 2
+    assert "双人复核" in requirement.reason
+
+
+def test_unknown_amount_is_treated_as_large() -> None:
+    """金额算不出来就按最严的处理 —— 不知道要动多少钱,就别让一个人拍板。"""
+    requirement = _requirement({"order_id": 1})
+
+    assert requirement.required == 2
+    assert "金额未知" in requirement.reason
+
+
+def test_resolved_amount_can_fill_in_for_a_missing_argument() -> None:
+    """金额不在参数里(不传 = 全额退款)时,用工具算出来的实际金额判档,而不是当未知。"""
+    spec = load_tools().get("create_refund")
+    args = {"order_id": 1}  # 没传 amount_cents
+
+    assert (
+        approval_requirement(spec, args, settings=Settings(), resolved_amount=2_000).required == 1
+    )
+    assert (
+        approval_requirement(spec, args, settings=Settings(), resolved_amount=50_000).required == 2
+    )
+
+
+def test_duplicate_signature_does_not_count_twice() -> None:
+    """同一个人的第二次请求是幂等的,但绝不能把 1/2 变成 2/2。"""
+    verdict = evaluate_approval(
+        run_actor="human:operator-01",
+        approver="supervisor-01",
+        tool="create_refund",
+        existing_approvers=["supervisor-01"],
+        required=2,
+        settings=Settings(),
+    )
+
+    assert verdict.decision is PolicyDecision.ALLOW
+    assert verdict.rule == "approval_duplicate"
+    assert "1/2" in verdict.reason
+
+
+def test_same_role_cannot_fill_the_second_signature() -> None:
+    """两个主管互相签字不算复核 —— 双人复核要的是不同角色,不是不同工号。"""
+    verdict = evaluate_approval(
+        run_actor="human:operator-01",
+        approver="supervisor-02",
+        tool="create_refund",
+        existing_approvers=["supervisor-01"],
+        required=2,
+        settings=Settings(
+            policy_approver_roles="supervisor-01=supervisor,supervisor-02=supervisor"
+        ),
+    )
+
+    assert verdict.decision is PolicyDecision.DENY
+    assert verdict.rule == "approval_same_role"
+
+
+def test_a_different_role_completes_the_second_signature() -> None:
+    verdict = evaluate_approval(
+        run_actor="human:operator-01",
+        approver="finance-01",
+        tool="create_refund",
+        existing_approvers=["supervisor-01"],
+        required=2,
+        settings=Settings(policy_approver_roles="supervisor-01=supervisor,finance-01=finance"),
+    )
+
+    assert verdict.decision is PolicyDecision.ALLOW
+    assert verdict.rule == "approval_allowed"
+    assert "2/2" in verdict.reason

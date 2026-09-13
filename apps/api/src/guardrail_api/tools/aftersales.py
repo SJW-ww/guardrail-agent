@@ -92,6 +92,16 @@ async def refund_snapshot(context: ToolContext, params: CreateRefundParams) -> d
     }
 
 
+async def refund_amount(context: ToolContext, params: CreateRefundParams) -> int | None:
+    """这笔退款实际要动多少钱。金额不传 = 按可退额度全额退,那就去订单上算出来。
+
+    治理层要的是「这次操作动多少钱」,而它不会去解析业务规则 —— 规则写在这里。
+    """
+    if params.amount_cents is not None:
+        return params.amount_cents
+    return await aftersales.available_refund_cents(context.session, params.order_id)
+
+
 async def ticket_snapshot(context: ToolContext, params: CloseTicketParams) -> dict[str, Any]:
     ticket = await aftersales.get_ticket(context.session, params.ticket_id)
     return {"ticket": _ticket_snapshot(ticket)}
@@ -119,6 +129,7 @@ async def ticket_snapshot(context: ToolContext, params: CloseTicketParams) -> di
     snapshot=refund_snapshot,
     reason_field="description",
     amount_field="amount_cents",
+    amount_resolver=refund_amount,
     tags=("aftersales", "write", "money"),
 )
 async def create_refund(context: ToolContext, params: CreateRefundParams) -> RefundTicketView:

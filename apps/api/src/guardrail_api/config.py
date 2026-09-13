@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # 是否允许机器执行体(agent: 前缀)批准人工审批步骤。
     # 默认不允许:让机器人给自己的同类签字,等于把审批这道闸门拆了。
     policy_allow_agent_approval: bool = False
+    # 双人复核阈值(分):超过这个金额的高风险操作要两个**不同角色**的人先后批准。
+    # 调大等于放宽;金额未知的高风险操作一律按超阈值处理(不知道金额就别让一个人说了算)。
+    policy_dual_approval_threshold_cents: int = 10000
+    # 审批人 -> 角色,格式 `supervisor-01=supervisor,finance-01=finance`。
+    # 没配角色的人**自成一种角色**(用身份当角色):所以默认行为就是"必须换个人签字"。
+    # 配了角色才知道"主管和财务"这种组织约束 —— 两个主管互相签字不算双人复核。
+    policy_approver_roles: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

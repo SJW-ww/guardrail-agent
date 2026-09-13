@@ -477,8 +477,9 @@ async def test_approved_step_resumes_and_executes(session: AsyncSession, factory
     run = await _run_of(session, run_uid)
     assert run.lease_owner is None, "等审批时不该占着租约,否则审批通过后没人能推进它"
     assert run.approvals == {}, "还没人批过"
-    # 批准要记名:留下的是"谁签的字",不是一个孤零零的序号
-    run.approvals = {"1": "supervisor-01"}
+    # 批准要记名:留下的是"谁签的字",不是一个孤零零的序号。
+    # 值是**一串**签名:金额 100 分没到双人复核阈值,所以一个人签一次就够。
+    run.approvals = {"1": ["human:supervisor-01"]}
     run.status = RunStatus.PENDING
     await session.commit()
 
@@ -493,7 +494,7 @@ async def test_approved_step_resumes_and_executes(session: AsyncSession, factory
     session.expire_all()
     entry = (await session.execute(select(AuditLog))).scalar_one()
     assert entry.policy_decision == "REQUIRE_APPROVAL"
-    assert "已获 supervisor-01 批准后执行" in (entry.policy_reason or "")
+    assert "已获 human:supervisor-01 批准后执行(共 1 人签字)" in (entry.policy_reason or "")
 
 
 async def test_l0_executor_is_denied_and_the_denial_is_audited(

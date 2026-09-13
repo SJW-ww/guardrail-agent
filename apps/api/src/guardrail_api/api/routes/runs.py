@@ -23,6 +23,8 @@ from guardrail_api.governance.executor import PlannedStep, RunExecutor, create_r
 from guardrail_api.governance.policy import PolicyDecision
 from guardrail_api.models import AgentRun, AgentStep, RunStatus, StepKind, StepStatus
 from guardrail_api.planner import draft
+from guardrail_api.tools import load_tools
+from guardrail_api.tools.registry import resolve_effective_amount
 
 router = APIRouter(prefix="/api/runs", tags=["governance"])
 
@@ -76,8 +78,9 @@ class RunView(BaseModel):
     waiting_ref: str | None = None
     # 兼容字段:由 approvals 派生。新代码请读 approvals,它才有"谁批的"
     approved_seqs: list[int]
-    approvals: dict[str, str] = Field(
-        default_factory=dict, description="批准记录:{步骤序号: 批准人}"
+    approvals: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="批准记录:{步骤序号: [批准人...]};大额操作需要多个不同角色的签名",
     )
     attempt: int
     last_error: str | None = None
@@ -252,25 +255,58 @@ async def approve_step(run_uid: str, seq: int, session: SessionDep, actor: Actor
     if step is None:
         raise RuleViolation(f"步骤 {seq} 不在这次执行的计划里")
 
+    settings = get_settings()
+    spec = load_tools().get(str(step["tool"]))
+    args = step.get("args") or {}
+    # 要几个签字必须和执行器算出同一个数:金额不在参数里时,一样去问工具自己。
+    resolved_amount = await resolve_effective_amount(spec, args, actor=run.actor, session=session)
+    requirement = policy.approval_requirement(
+        spec, args, settings=settings, resolved_amount=resolved_amount
+    )
+    existing = run.approvers_of(seq)
+
+    # 已经签够了:重复请求按幂等处理,不报错也不重复计数
+    if run.is_fully_approved(seq, requirement.required):
+        return await _detail(session, run)
+
     approver = normalize_actor(actor)
     verdict = policy.evaluate_approval(
         run_actor=run.actor,
         approver=approver,
-        tool=str(step["tool"]),
-        settings=get_settings(),
+        tool=spec.name,
+        existing_approvers=existing,
+        required=requirement.required,
+        settings=settings,
     )
     if verdict.decision is not PolicyDecision.ALLOW:
-        raise PolicyDenied(verdict.reason, rule=verdict.rule, run_uid=run_uid, step_seq=seq)
+        raise PolicyDenied(
+            verdict.reason,
+            rule=verdict.rule,
+            run_uid=run_uid,
+            step_seq=seq,
+            required=requirement.required,
+            collected=existing,
+        )
 
-    # 记名,且**不覆盖**:同一个步骤被批第二次时,留下的是第一个签字的人。
-    # 谁先愿意为这次写操作负责,就是谁的责任。
-    approvals = dict(run.approvals or {})
-    approvals.setdefault(str(seq), approver)
-    run.approvals = approvals
-    run.waiting_ref = None
-    # 审批通过只是「允许继续」,不代表已经执行:状态回到 PENDING,等 worker 或调用方推进
-    if run.status is RunStatus.WAITING_APPROVAL:
-        run.status = RunStatus.PENDING
+    # 记名。签名是**追加**的,不覆盖前面的人 —— 双人复核要的就是"不止一个人"。
+    if approver not in existing:
+        run.approvals = {**(run.approvals or {}), str(seq): [*existing, approver]}
+    collected = run.approvers_of(seq)
+
+    if len(collected) >= requirement.required:
+        run.waiting_ref = None
+        # 审批通过只是「允许继续」,不代表已经执行:状态回到 PENDING,等 worker 或调用方推进
+        if run.status is RunStatus.WAITING_APPROVAL:
+            run.status = RunStatus.PENDING
+    else:
+        # 还差人:状态保持等审批,但把进度更新到 checkpoint,界面上要看得见"还差几人"
+        checkpoint = dict(run.checkpoint or {})
+        checkpoint["approval"] = {
+            "required": requirement.required,
+            "collected": collected,
+            "remaining": requirement.required - len(collected),
+        }
+        run.checkpoint = checkpoint
 
     await session.commit()
     session.expire_all()

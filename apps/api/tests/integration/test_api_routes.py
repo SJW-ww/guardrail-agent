@@ -302,7 +302,8 @@ async def test_approving_a_step_records_who_signed(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["approvals"] == {"1": "human:supervisor-01"}
+    # 签名是**一串**人类执行体。金额 2000 分没到双人复核阈值,一个人签一次就够。
+    assert body["approvals"] == {"1": ["human:supervisor-01"]}
     assert body["approved_seqs"] == [1], "兼容字段由 approvals 派生,不会漂移"
 
 
@@ -346,17 +347,64 @@ async def test_machine_cannot_approve_by_default(
 async def test_second_approval_keeps_the_first_signature(
     session: AsyncSession, api_client: AsyncClient
 ) -> None:
-    """重复批准不覆盖签名:谁先愿意负责,就是谁的责任。"""
+    """签够之后再有人点批准,不覆盖也不重复计数 —— 谁先愿意负责,就是谁的责任。"""
     order = await _seed_order(session)
     await api_client.post(f"/api/orders/{order.id}/pay")
     run_uid = await _invoke_refund_run(api_client, order.id, "operator-07")
 
-    await api_client.post(
+    first = await api_client.post(
         f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-01"}
     )
+    assert first.status_code == 200, first.text
     again = await api_client.post(
         f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-02"}
     )
 
     assert again.status_code == 200
-    assert again.json()["approvals"] == {"1": "human:supervisor-01"}
+    assert again.json()["approvals"] == {"1": ["human:supervisor-01"]}, "没签够之前不会被后来者顶掉"
+
+
+async def test_large_refund_needs_two_signatures_before_it_can_run(
+    session: AsyncSession, api_client: AsyncClient
+) -> None:
+    """过阈值的退款:第一票只推进进度,换个人签第二票才算批完,期间业务表一行不多。"""
+    # 8000 分 x 2 件 = 16000 分,超过双人复核阈值 10000 分
+    order = await _seed_order(session, index=9, price_cents=8000)
+    await api_client.post(f"/api/orders/{order.id}/pay")
+
+    invoked = await api_client.post(
+        "/api/tools/create_refund/invoke",
+        json={"arguments": {"order_id": order.id, "reason_code": "QUALITY_ISSUE"}},
+        headers={"X-Actor": "operator-07"},
+    )
+    assert invoked.status_code == 202, invoked.text
+    run_uid = invoked.json()["run_uid"]
+
+    first = await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "supervisor-01"}
+    )
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["approvals"] == {"1": ["human:supervisor-01"]}
+    assert body["status"] == "WAITING_APPROVAL", "只签了一半,还不能执行"
+    assert body["checkpoint"]["approval"] == {
+        "required": 2,
+        "collected": ["human:supervisor-01"],
+        "remaining": 1,
+    }
+    tickets = await api_client.get("/api/tickets", params={"limit": 100})
+    assert tickets.json()["total"] == 0, "没签够之前不许写业务表"
+
+    second = await api_client.post(
+        f"/api/runs/{run_uid}/steps/1/approve", headers={"X-Actor": "finance-01"}
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "PENDING", "两个人都签了才允许继续"
+    assert sorted(second.json()["approvals"]["1"]) == ["human:finance-01", "human:supervisor-01"]
+
+    executed = await api_client.post(f"/api/runs/{run_uid}/execute")
+    assert executed.status_code == 200, executed.text
+    pending = await api_client.get("/api/tickets", params={"status": "PENDING"})
+    assert pending.json()["items"][0]["refund_amount_cents"] == 16000, (
+        "不传金额 = 按订单可退额度全额"
+    )

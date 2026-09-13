@@ -28,7 +28,7 @@
 裁决理由是给人看的:审批人要知道自己批的是什么,审计要能解释当时为什么放行。
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -36,6 +36,14 @@ from typing import Any
 from guardrail_api.config import Settings
 from guardrail_api.domain.trust import TrustLevel
 from guardrail_api.tools.base import RiskLevel, ToolSpec
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequirement:
+    """一次审批要集齐几个人的签字,以及为什么。"""
+
+    required: int
+    reason: str
 
 
 class PolicyDecision(StrEnum):
@@ -98,13 +106,20 @@ def resolve_trust_level(actor: str, settings: Settings) -> tuple[TrustLevel, str
     return level, f"执行体 {actor} 未单独配置,采用默认信任等级 {level.value}"
 
 
-def _amount_of(spec: ToolSpec, arguments: Mapping[str, Any]) -> int | None:
-    """金额只能从工具声明过的字段里读。没声明就当作"无法套用额度"处理。"""
+def _amount_of(
+    spec: ToolSpec, arguments: Mapping[str, Any], *, resolved: int | None = None
+) -> int | None:
+    """金额只能从工具声明过的字段里读。没声明就当作"无法套用额度"处理。
+
+    `resolved` 是调用方(执行器/网关)用工具的 `amount_resolver` 算出来的实际金额,
+    用于「金额不在参数里」的情况:例如 create_refund 不传金额 = 全额退款,
+    真实金额得从订单上算。策略引擎不查库,它只消费这个结果。
+    """
     if spec.amount_field is None:
         return None
     value = arguments.get(spec.amount_field)
     if value is None:
-        return None
+        return resolved
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -117,6 +132,7 @@ def evaluate(
     *,
     actor: str,
     settings: Settings,
+    resolved_amount: int | None = None,
 ) -> PolicyVerdict:
     """对一次工具调用做出裁决。纯函数 —— 同样的输入永远得到同样的结论,方便测试与复盘。"""
     trust, source = resolve_trust_level(actor, settings)
@@ -147,7 +163,14 @@ def evaluate(
         )
 
     if spec.risk_level is RiskLevel.HIGH:
-        return _evaluate_high_risk(spec, arguments, trust=trust, source=source, settings=settings)
+        return _evaluate_high_risk(
+            spec,
+            arguments,
+            trust=trust,
+            source=source,
+            settings=settings,
+            resolved_amount=resolved_amount,
+        )
 
     # 低风险写:L2 要求可逆(有补偿动作),L3 及以上直接放行
     if trust is TrustLevel.L2 and not spec.compensate_tool:
@@ -163,23 +186,82 @@ def evaluate(
     )
 
 
+def parse_roles(raw: str) -> dict[str, str]:
+    """解析 `审批人=角色` 配置,格式 `supervisor-01=supervisor,finance-01=finance`。"""
+    roles: dict[str, str] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        actor, _, role = item.partition("=")
+        actor, role = actor.strip(), role.strip()
+        if not actor or not role:
+            raise ValueError(f"角色配置格式应为 actor=role,收到:{item!r}")
+        roles[actor] = role
+    return roles
+
+
+def role_of(approver: str, settings: Settings) -> str:
+    """审批人的角色。
+
+    **没配角色的人自成一种角色**(用身份当角色)。这个默认让「必须换个人签字」
+    不需要任何配置就成立;配了角色之后才知道「主管 + 财务」这种组织约束。
+    """
+    return parse_roles(settings.policy_approver_roles).get(approver, approver)
+
+
+def approval_requirement(
+    spec: ToolSpec,
+    arguments: Mapping[str, Any],
+    *,
+    settings: Settings,
+    resolved_amount: int | None = None,
+) -> ApprovalRequirement:
+    """这一步需要几个人签字。金额越大,越不该由一个人说了算。"""
+    if spec.risk_level is not RiskLevel.HIGH:
+        return ApprovalRequirement(required=1, reason=f"{spec.name} 不是高风险操作,一个人签字即可")
+
+    threshold = settings.policy_dual_approval_threshold_cents
+    amount = _amount_of(spec, arguments, resolved=resolved_amount)
+    if amount is None:
+        # 金额未知时从严:不知道要动多少钱,就别让一个人拍板
+        return ApprovalRequirement(
+            required=2,
+            reason=f"{spec.name} 是高风险操作但本次金额未知,从严要求双人复核",
+        )
+    if amount > threshold:
+        return ApprovalRequirement(
+            required=2,
+            reason=(f"金额 {amount} 分超过双人复核阈值 {threshold} 分,需要两个不同角色先后签字"),
+        )
+    return ApprovalRequirement(
+        required=1,
+        reason=f"金额 {amount} 分未超过双人复核阈值 {threshold} 分,一个人签字即可",
+    )
+
+
 def evaluate_approval(
     *,
     run_actor: str,
     approver: str,
     tool: str,
     settings: Settings,
+    existing_approvers: Sequence[str] = (),
+    required: int = 1,
 ) -> PolicyVerdict:
-    """审批本身也要裁决:**谁能批、谁不能批**,同样给理由。
+    """审批本身也要裁决:**谁能批、谁不能批、这一票算不算数**,同样给理由。
 
-    两条不能少的规则:
+    四条规则,按顺序:
 
     1. **不能自己批自己。** 发起这次执行的执行体再点一次「批准」,那不是审批,
        是把闸门拆了。职责分离(separation of duties)是最古老也最有效的一条控制。
     2. **机器不能替人做审批决定。** 审批的意义在于「有个人愿意为这次写操作负责」;
        一个 agent: 前缀的调用者点批准,没人因此负责。
+    3. **同一人重复签字不重复计数。** 不是错误 —— 请求重发本来就该是幂等的,
+       但它也绝不能把 1/2 变成 2/2。
+    4. **双人复核要求不同角色。** 两个主管互相签字不算复核。
 
-    注意这两条都只约束「谁」,不约束「批的是哪一步」—— 后者是 evaluate() 的事。
+    这些规则只约束「谁」,不约束「批的是哪一步」—— 后者是 evaluate() 的事。
     """
     trust, source = resolve_trust_level(approver, settings)
 
@@ -202,10 +284,35 @@ def evaluate_approval(
             trust_level=trust,
         )
 
+    if approver in existing_approvers:
+        return PolicyVerdict(
+            decision=PolicyDecision.ALLOW,
+            rule="approval_duplicate",
+            reason=(
+                f"{approver} 已经为这一步签过字,不重复计数"
+                f"(当前 {len(existing_approvers)}/{required})"
+            ),
+            trust_level=trust,
+        )
+
+    existing_roles = {role_of(item, settings) for item in existing_approvers}
+    my_role = role_of(approver, settings)
+    if my_role in existing_roles:
+        return PolicyVerdict(
+            decision=PolicyDecision.DENY,
+            rule="approval_same_role",
+            reason=(
+                f"已由 {sorted(existing_approvers)} 以角色「{my_role}」签字,"
+                f"{approver} 的角色相同 —— 双人复核要的是不同角色,不是不同工号"
+            ),
+            trust_level=trust,
+        )
+
+    collected = len(existing_approvers) + 1
     return PolicyVerdict(
         decision=PolicyDecision.ALLOW,
         rule="approval_allowed",
-        reason=f"{approver}({source})批准 {tool} 的执行,责任落到该审批人",
+        reason=(f"{approver}(角色 {my_role},{source})签字 {collected}/{required};责任落到该审批人"),
         trust_level=trust,
     )
 
@@ -217,6 +324,7 @@ def _evaluate_high_risk(
     trust: TrustLevel,
     source: str,
     settings: Settings,
+    resolved_amount: int | None = None,
 ) -> PolicyVerdict:
     def verdict(decision: PolicyDecision, rule: str, reason: str) -> PolicyVerdict:
         return PolicyVerdict(decision=decision, rule=rule, reason=reason, trust_level=trust)
@@ -237,7 +345,7 @@ def _evaluate_high_risk(
             "自动执行的前提是出错能回退,故转人工审批",
         )
 
-    amount = _amount_of(spec, arguments)
+    amount = _amount_of(spec, arguments, resolved=resolved_amount)
     if amount is None:
         return verdict(
             PolicyDecision.REQUIRE_APPROVAL,

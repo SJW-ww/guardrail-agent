@@ -40,8 +40,8 @@ from guardrail_api.models import (
     StepKind,
     StepStatus,
 )
-from guardrail_api.tools.base import ToolContext
-from guardrail_api.tools.registry import ToolRegistry, load_tools
+from guardrail_api.tools.base import ToolContext, ToolSpec
+from guardrail_api.tools.registry import ToolRegistry, load_tools, resolve_effective_amount
 
 logger = logging.getLogger("guardrail.executor")
 
@@ -239,7 +239,8 @@ class RunExecutor:
                 if not status.is_terminal and run.lease_owner != self.worker_id:
                     raise LeaseLost(f"run {run_uid} 的租约已被 {run.lease_owner} 接管,停止推进")
                 completed = await self._completed_seqs(run.id)
-                approved = set(run.approved_seqs or [])
+                # 已收集到的签名,按步骤号。够不够要看策略要求的签名人数,这里只取事实。
+                signatures = {int(seq): list(names) for seq, names in (run.approvals or {}).items()}
                 step_budget = run.step_budget
                 actor = run.actor
 
@@ -263,7 +264,13 @@ class RunExecutor:
                 raise RunBudgetExceeded(message, run_uid=run_uid, step_budget=step_budget)
 
             step = remaining[0]
-            verdict = self._judge(step, actor=actor)
+            spec = self.registry.get(step.tool)
+            resolved_amount = await self._resolve_amount(spec, step, actor)
+            verdict = self._judge(step, actor=actor, resolved_amount=resolved_amount)
+            requirement = policy.approval_requirement(
+                spec, step.args, settings=self.settings, resolved_amount=resolved_amount
+            )
+            collected = signatures.get(step.seq, [])
 
             # 拒绝:一步都不碰业务表。但审计要留痕(见 _record_failure)——
             # 「这次尝试被挡下来了」本身就是要存档的事实。
@@ -280,8 +287,12 @@ class RunExecutor:
             needs_approval = step.requires_approval or verdict.decision is (
                 PolicyDecision.REQUIRE_APPROVAL
             )
-            if needs_approval and step.seq not in approved:
-                await self._wait_for_approval(run_uid, step, verdict)
+            # 签字够数才算批准。大额操作要求两个不同角色,只签了一个仍然挂起 ——
+            # 「有人签过」和「签够了」是两件事。
+            if needs_approval and len(collected) < requirement.required:
+                await self._wait_for_approval(
+                    run_uid, step, verdict, requirement.required, collected
+                )
                 result.status = RunStatus.WAITING_APPROVAL
                 return
 
@@ -327,15 +338,32 @@ class RunExecutor:
 
         return await self._execute_step(run_uid, step, verdict)
 
-    def _judge(self, step: PlannedStep, *, actor: str) -> PolicyVerdict:
+    def _judge(
+        self, step: PlannedStep, *, actor: str, resolved_amount: int | None = None
+    ) -> PolicyVerdict:
         """按「工具声明 + 执行体信任等级」现算一次裁决。
 
         刻意放在执行时而不是计划时:计划可能是几分钟前写的,而权限是现在生效的。
         计划里冻结一个 ALLOW,等于给越权留了一个时间窗。
         """
         return policy.evaluate(
-            self.registry.get(step.tool), step.args, actor=actor, settings=self.settings
+            self.registry.get(step.tool),
+            step.args,
+            actor=actor,
+            settings=self.settings,
+            resolved_amount=resolved_amount,
         )
+
+    async def _resolve_amount(self, spec: ToolSpec, step: PlannedStep, actor: str) -> int | None:
+        """参数里没写金额时,问工具自己这笔操作实际动多少钱(可能要查库)。
+
+        这一步必须发生在审批门之前 —— 不然一笔小额退款会因为"金额未知"
+        被误判成需要双人复核,而一笔没传金额的大额退款可能正好相反。
+        """
+        if spec.amount_field is None or step.args.get(spec.amount_field) is not None:
+            return None
+        async with self._sessions() as session:
+            return await resolve_effective_amount(spec, step.args, actor=actor, session=session)
 
     async def _actor_of(self, run_uid: str) -> str:
         async with self._sessions() as session:
@@ -372,7 +400,7 @@ class RunExecutor:
                 context = ToolContext(session=session, actor=run.actor, run_id=run.run_uid)
                 # 这一步是谁批的。不记这一笔的话,审计里只留下一句"必须人工审批",
                 # 读起来像是被拦住了;而且复盘时答不出「谁为这次写操作签的字」。
-                approver = run.approver_of(step.seq)
+                approvers = run.approvers_of(step.seq)
 
                 claim = None
                 if key is not None:
@@ -414,7 +442,7 @@ class RunExecutor:
                             reason=reason,
                             outcome=AuditOutcome.SUCCEEDED,
                             policy_decision=verdict.decision.value,
-                            policy_reason=_policy_reason(verdict, approver),
+                            policy_reason=_policy_reason(verdict, approvers),
                         )
                     await self._close_step(
                         session, step_row, result=payload, idempotency_key=key, replayed=False
@@ -640,9 +668,15 @@ class RunExecutor:
             await session.commit()
 
     async def _wait_for_approval(
-        self, run_uid: str, step: PlannedStep, verdict: PolicyVerdict
+        self,
+        run_uid: str,
+        step: PlannedStep,
+        verdict: PolicyVerdict,
+        required: int = 1,
+        collected: list[str] | None = None,
     ) -> None:
-        """挂起等人工。**把裁决理由一起存下来** —— 审批人要知道自己在批什么。"""
+        """挂起等人工。**把裁决理由和已收集的签名一起存下来** ——
+        审批人要知道自己在批什么、还差几个人。"""
         async with self._sessions() as session:
             run = await self._load(session, run_uid)
             run.status = RunStatus.WAITING_APPROVAL
@@ -651,6 +685,11 @@ class RunExecutor:
                 "seq": run.checkpoint_seq,
                 "waiting_for": step.to_dict(),
                 "policy": verdict.to_dict(),
+                "approval": {
+                    "required": required,
+                    "collected": list(collected or []),
+                    "remaining": max(required - len(collected or []), 0),
+                },
                 "at": utcnow().isoformat(),
             }
             # **等审批不等于在执行,不能占着租约。** 占着的话审批人点完「批准」之后
@@ -724,10 +763,14 @@ class RunExecutor:
             self.chaos(event, seq)
 
 
-def _policy_reason(verdict: PolicyVerdict, approver: str | None) -> str:
-    """审计里的裁决理由。有人批过就补一句 —— 否则读起来像"被拦住了",而它其实执行了。"""
-    if approver:
-        return f"{verdict.reason};该操作已获 {approver} 批准后执行"
+def _policy_reason(verdict: PolicyVerdict, approvers: list[str]) -> str:
+    """审计里的裁决理由。有人批过就补一句 —— 否则读起来像"被拦住了",而它其实执行了。
+
+    签名人数一起写进去:双人复核的意义就是"不止一个人点了头",审计得看得出来。
+    """
+    if approvers:
+        who = "、".join(approvers)
+        return f"{verdict.reason};该操作已获 {who} 批准后执行(共 {len(approvers)} 人签字)"
     return verdict.reason
 
 

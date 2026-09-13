@@ -770,10 +770,10 @@ export interface components {
             approved_seqs: number[];
             /**
              * Approvals
-             * @description 批准记录:{步骤序号: 批准人}
+             * @description 批准记录:{步骤序号: [批准人...]};大额操作需要多个不同角色的签名
              */
             approvals?: {
-                [key: string]: string;
+                [key: string]: string[];
             };
             /** Attempt */
             attempt: number;
@@ -836,10 +836,10 @@ export interface components {
             approved_seqs: number[];
             /**
              * Approvals
-             * @description 批准记录:{步骤序号: 批准人}
+             * @description 批准记录:{步骤序号: [批准人...]};大额操作需要多个不同角色的签名
              */
             approvals?: {
-                [key: string]: string;
+                [key: string]: string[];
             };
             /** Attempt */
             attempt: number;

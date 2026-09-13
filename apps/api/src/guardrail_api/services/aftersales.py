@@ -165,6 +165,7 @@ async def close_ticket(session: AsyncSession, ticket_id: int, *, operator: str) 
 
 
 async def refunded_cents(session: AsyncSession, order_id: int) -> int:
+    """这张订单**已经退出去**的金额。"""
     total = await session.scalar(
         select(func.coalesce(func.sum(AftersalesTicket.refund_amount_cents), 0)).where(
             AftersalesTicket.order_id == order_id,
@@ -175,6 +176,7 @@ async def refunded_cents(session: AsyncSession, order_id: int) -> int:
 
 
 async def pending_refund_cents(session: AsyncSession, order_id: int) -> int:
+    """占着额度但还没退出去(待审批 + 已审批)的金额。"""
     total = await session.scalar(
         select(func.coalesce(func.sum(AftersalesTicket.refund_amount_cents), 0)).where(
             AftersalesTicket.order_id == order_id,
@@ -182,6 +184,20 @@ async def pending_refund_cents(session: AsyncSession, order_id: int) -> int:
         )
     )
     return int(total or 0)
+
+
+async def available_refund_cents(session: AsyncSession, order_id: int) -> int:
+    """这张订单此刻还能退多少:总额 - 已退 - 审批中占用的额度。
+
+    和 `request_refund` 里那三行是同一个口径 —— 它存在的意义是让治理层(策略引擎)
+    也能问出「这笔操作到底要动多少钱」,而不用去猜参数里有没有传金额。
+    """
+    order = await session.get(Order, order_id)
+    if order is None:
+        raise NotFound(f"订单 {order_id} 不存在")
+    refunded = await refunded_cents(session, order_id)
+    claimed = await pending_refund_cents(session, order_id)
+    return order.total_amount_cents - refunded - claimed
 
 
 def ticket_requested_at(ticket: AftersalesTicket) -> datetime:

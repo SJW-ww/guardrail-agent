@@ -29,6 +29,25 @@ function readPolicy(checkpoint: Record<string, unknown> | null | undefined): Pol
   };
 }
 
+type ApprovalProgress = { required: number; collected: string[]; remaining: number };
+
+/** checkpoint.approval 是执行器挂起时写下的签名进度 —— 审批人要知道还差几个人。 */
+function readApproval(
+  checkpoint: Record<string, unknown> | null | undefined,
+): ApprovalProgress | null {
+  const raw = checkpoint?.approval;
+  if (!raw || typeof raw !== "object") return null;
+  const approval = raw as Record<string, unknown>;
+  const required = Number(approval.required ?? 0);
+  if (!Number.isFinite(required) || required < 1) return null;
+  const collected = Array.isArray(approval.collected) ? (approval.collected as string[]) : [];
+  return {
+    required,
+    collected,
+    remaining: Number(approval.remaining ?? Math.max(required - collected.length, 0)),
+  };
+}
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runUid: string }> }) {
   const { runUid } = await params;
 
@@ -40,6 +59,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
       ? Number(run.waiting_ref.split(":")[1])
       : null;
     const policy = readPolicy(run.checkpoint);
+    const approval = readApproval(run.checkpoint);
 
     return (
       <div className="space-y-6">
@@ -72,9 +92,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
           <section className="space-y-1 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3">
             <p className="font-mono text-xs text-neutral-500">审批记录(谁为哪一步签的字)</p>
             <ul className="space-y-0.5 text-sm text-neutral-300">
-              {Object.entries(run.approvals ?? {}).map(([seq, approver]) => (
+              {Object.entries(run.approvals ?? {}).map(([seq, approvers]) => (
                 <li key={seq}>
-                  步骤 #{seq} ← <span className="font-mono">{approver}</span>
+                  步骤 #{seq} ← <span className="font-mono">{approvers.join("、")}</span>
+                  {approval?.required && approvers.length < approval.required && (
+                    <span className="ml-2 text-amber-300/90">
+                      还差 {approval.required - approvers.length} 人
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -86,6 +111,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
           status={run.status}
           steps={run.steps}
           waitingSeq={waitingSeq}
+          approval={approval}
         />
 
         <section className="space-y-3">

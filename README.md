@@ -125,10 +125,23 @@ make demo-governance
   机器执行体(`agent:` 前缀)默认不能替人签字 —— 审批的意义就在于有人负责。
   真要自动化审批,得显式打开 `POLICY_ALLOW_AGENT_APPROVAL` 并自担风险。
 - **批了哪一步**:必须在这次执行的计划里,否则直接拒绝。
-- **是谁批的**:`agent_run.approvals = {"1": "human:supervisor-01"}`,
+- **是谁批的**:`agent_run.approvals = {"1": ["human:supervisor-01"]}`,
   且**重复批准不覆盖** —— 谁先签字,就是谁的责任。执行时的审计行会写上
-  「已获 human:supervisor-01 批准后执行」,所以「谁批的」这一份记录
+  「已获 human:supervisor-01 批准后执行(共 1 人签字)」,所以「谁批的」这一份记录
   落在不可篡改的 `audit_log` 里,而不是只在可改的 run 行上。
+
+**金额越大,越不该由一个人说了算。** 高风险操作超过
+`POLICY_DUAL_APPROVAL_THRESHOLD_CENTS`(默认 10000 分)时要求**两个不同角色**先后签字:
+
+- 签名是一**串**而不是一个:签够 1/2 只推进进度(`checkpoint.approval` 里能看到
+  `required / collected / remaining`),状态仍是 `WAITING_APPROVAL`,业务表一行不动;
+- 同一个人重复点批准是**幂等**的,但绝不会把 1/2 变成 2/2;
+- 两个人必须是**不同角色**:`POLICY_APPROVER_ROLES=supervisor-01=supervisor,finance-01=finance`
+  配了角色才知道「两个主管互相签字不算复核」;没配角色时**每个人自成一种角色**,
+  「必须换个人」这条默认就成立;
+- **金额未知一律从严**(按超阈值处理):宁可多要一个签字,也不要在一笔不知道多少钱的操作上赌一次。
+  所以「不传金额 = 全额退款」这种默认值由工具自己声明(`ToolSpec.amount_resolver`),
+  策略引擎拿它的结果判档,而不是去猜参数里有没有 `amount_cents`。
 
 审批通过只是**放行**,不是执行:状态回到 `PENDING`,等 worker 或调用方推进。
 
@@ -216,7 +229,9 @@ GuardRail/
 | W1 D6-D7 | 前端三台 + REST 路由 + OpenAPI 契约 + 端到端 | ✅ |
 | W2 | 治理内核:Checkpoint 续跑 · 幂等 · 租约 · 审计 | ✅ |
 | W3 | LLM 规划器 + 策略引擎 + 审计裁决留痕 | ✅ |
-| W4-W8 | 多步编排 · 补偿 Saga · 可观测与评测 · 开源 | ⬜ |
+| W4-1 | 审批记名 + 职责分离(不能自己批自己 / 机器不能替人签字) | ✅ |
+| W4-2 | 双人复核:大额操作两个不同角色签字,金额未知从严 | ✅ |
+| W5-W8 | 多步编排 · 补偿 Saga · 可观测与评测 · 开源 | ⬜ |
 
 ## 本地要求
 
