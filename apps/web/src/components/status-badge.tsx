@@ -9,7 +9,7 @@ import {
 type Tone = "neutral" | "info" | "success" | "warn" | "danger";
 
 const TONE_CLASS: Record<Tone, string> = {
-  neutral: "bg-neutral-800 text-neutral-300",
+  neutral: "bg-raised text-muted",
   info: "bg-sky-500/10 text-sky-300",
   success: "bg-emerald-500/10 text-emerald-300",
   warn: "bg-amber-500/10 text-amber-300",

@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { ApiErrorNotice } from "@/components/api-error-notice";
 import { approveStep, compensateRun, executeRun, retryStep } from "@/lib/api";
+import { useIdentity } from "@/lib/identity";
 
 /**
  * 执行详情页上的审批身份。刻意用一个**不同于发起者**的人:
@@ -47,6 +48,9 @@ export function RunActions({
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [approver, setApprover] = useState<string>(DEFAULT_APPROVER);
+  // 登录之后签署人就是本人 —— 后端也只认会话,下拉框再留着就是骗人
+  const { principal } = useIdentity();
+  const signer = principal?.username ?? approver;
 
   const terminal = status === "SUCCEEDED" || status === "FAILED" || status === "COMPENSATED";
 
@@ -68,7 +72,7 @@ export function RunActions({
   }
 
   return (
-    <section className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
+    <section className="space-y-3 rounded-lg border border-line bg-surface p-4">
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -81,33 +85,41 @@ export function RunActions({
 
         {waitingSeq !== null && (
           <>
-            <label htmlFor="approver" className="text-xs text-neutral-400">
-              审批人身份
-            </label>
-            <select
-              id="approver"
-              value={approver}
-              disabled={busy !== null}
-              onChange={(event) => setApprover(event.target.value)}
-              className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-sm text-neutral-200 disabled:opacity-50"
-            >
-              {APPROVERS.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+            {principal ? (
+              <span className="text-xs text-muted">
+                签署人 <span className="font-mono text-ink">{principal.actor}</span>
+              </span>
+            ) : (
+              <>
+                <label htmlFor="approver" className="text-xs text-muted">
+                  审批人身份
+                </label>
+                <select
+                  id="approver"
+                  value={approver}
+                  disabled={busy !== null}
+                  onChange={(event) => setApprover(event.target.value)}
+                  className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-ink disabled:opacity-50"
+                >
+                  {APPROVERS.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             <button
               type="button"
               disabled={busy !== null}
-              onClick={() => run("approve", () => approveStep(runUid, waitingSeq, approver))}
+              onClick={() => run("approve", () => approveStep(runUid, waitingSeq, signer))}
               className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
             >
               {busy === "approve"
                 ? "批准中…"
                 : approval && approval.required > 1
-                  ? `批准第 ${waitingSeq} 步(还差 ${approval.remaining} 人,以 ${approver} 身份)`
-                  : `批准第 ${waitingSeq} 步(以 ${approver} 身份)`}
+                  ? `批准第 ${waitingSeq} 步(还差 ${approval.remaining} 人,以 ${signer} 身份)`
+                  : `批准第 ${waitingSeq} 步(以 ${signer} 身份)`}
             </button>
           </>
         )}
@@ -118,7 +130,7 @@ export function RunActions({
             disabled={busy !== null}
             onClick={() =>
               run("compensate", async () => {
-                const payload = await compensateRun(runUid, approver);
+                const payload = await compensateRun(runUid, signer);
                 // 契约里这两个字段带默认值,所以生成出来的类型是可选的;
                 // 后端每次都显式返回,这里只是把类型边界补齐。
                 const compensated = payload.compensated ?? [];
@@ -148,18 +160,18 @@ export function RunActions({
             type="button"
             disabled={busy !== null}
             onClick={() => run(`retry-${step.seq}`, () => retryStep(runUid, step.seq))}
-            className="rounded-md border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+            className="rounded-md border border-line-strong px-3 py-1.5 text-sm text-muted hover:bg-raised disabled:opacity-50"
           >
             {busy === `retry-${step.seq}` ? "重试中…" : `重试 #${step.seq}`}
           </button>
         ))}
       </div>
 
-      <p className="text-xs text-neutral-500">
+      <p className="text-xs text-subtle">
         重试一个已成功的步骤只会命中幂等账本,不会产生第二次副作用 ——
         这是「可写」能上生产的前提。
       </p>
-      <p className="text-xs text-neutral-500">
+      <p className="text-xs text-subtle">
         「撤销这次执行」按工具声明的补偿动作逆序撤回已成功的写操作:
         撤不干净时一步都不撤,并把原因写回来(部分补偿比不补偿更难排查)。
       </p>

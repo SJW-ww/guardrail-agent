@@ -46,14 +46,14 @@ export function OrderActions({ orderId, status }: { orderId: number; status: Ord
 
   if (actions.length === 0 && !cancellable) {
     return (
-      <section className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-4 text-sm text-neutral-500">
+      <section className="rounded-lg border border-line bg-surface p-4 text-sm text-subtle">
         订单已进入终态,没有可执行的状态流转。要动钱请走 Agent 操作台发起退款申请。
       </section>
     );
   }
 
   return (
-    <section className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
+    <section className="space-y-3 rounded-lg border border-line bg-surface p-4">
       <div className="flex flex-wrap items-center gap-2">
         {actions.map((action) => (
           <button
@@ -84,7 +84,7 @@ export function OrderActions({ orderId, status }: { orderId: number; status: Ord
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             placeholder="取消原因(会写进订单与审计)"
-            className="min-w-64 flex-1 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-1.5 text-sm outline-none focus:border-emerald-600"
+            className="min-w-64 flex-1 rounded-md border border-line-strong bg-canvas px-3 py-1.5 text-sm outline-none focus:border-brand"
           />
           <button
             type="button"
@@ -97,7 +97,7 @@ export function OrderActions({ orderId, status }: { orderId: number; status: Ord
           <button
             type="button"
             onClick={() => setAskReason(false)}
-            className="rounded-md px-3 py-1.5 text-sm text-neutral-400 hover:text-neutral-200"
+            className="rounded-md px-3 py-1.5 text-sm text-muted hover:text-ink"
           >
             放弃
           </button>

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
-import { SiteNav } from "@/components/site-nav";
+import { AppShell } from "@/components/layout/app-shell";
 
 import "./globals.css";
 
@@ -13,11 +13,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body className="min-h-screen antialiased">
-        <SiteNav />
-        <main className="mx-auto max-w-6xl px-6 py-10">{children}</main>
+      <body className="antialiased">
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );
 }
-

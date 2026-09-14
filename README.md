@@ -258,6 +258,32 @@ CI 走的是 deterministic 规划器(离线、免费);这条命令需要 `.env` 
 模型不可用时**不会**偷偷退回规则规划器:审计里写着"模型提议"、实际却是规则拼出来的,
 这种记录比没有记录更糟。
 
+## 身份层(W8)
+
+前面所有「记名」「职责分离」「机器不能替人签字」,都建立在一个前提上:**系统知道签字的人是谁**。
+在此之前执行体来自请求头 `X-Actor` —— 调用方说自己是谁就是谁。那等于任何人都能以
+`human:supervisor-01` 的名义签掉一笔退款,W4 就只是纸面规则。
+
+两张表把身份变成数据库事实:
+
+- `principal`      人:用户名、角色、scrypt 口令散列。每次散列都换新盐,老参数升级后仍可校验。
+- `login_session`  会话:**不透明随机令牌**,库里只存 sha256,可撤销。
+
+刻意不签 JWT:自包含令牌一旦签发就收不回来。审计系统必须能立刻踢人下线
+(离职、设备丢失),所以登出撤销的是**服务端记录**,不是靠清 cookie 假装失效。
+
+登录态走 `HttpOnly; SameSite=Lax` cookie,前端 JS 读不到。生效顺序是:
+
+| 环境 | 会话 cookie | 结果 |
+| --- | --- | --- |
+| 任意 | 有效 | `human:<登录名>` —— **请求头不再参与**,伪造 `X-Actor` 无效 |
+| local / test | 无 | 退回 `X-Actor`(脚本与端到端测试要能指定执行体) |
+| staging / prod | 无或失效 | 401。不放行匿名,也不悄悄降级成别人 |
+
+演示账号由 seed 建好(`supervisor-01` / `supervisor-02` / `finance-01` / `operator-01`),
+口令取自 `DEMO_PASSWORD`(默认 `guardrail-demo`);已存在的账号不会被重灌覆盖。
+机器身份(`agent:*`)**不能**通过登录获得 —— 人只能以人的名义登录。
+
 ## 快速开始
 
 ```bash
@@ -265,9 +291,9 @@ make init        # 生成 .env
 make up          # 起 postgres + redis + api + web
 make ps          # 看状态
 make migrate     # 建表
-make seed        # 灌演示数据(100 客户 / 200 商品 / 500 订单 / 200 工单)
+make seed        # 灌演示数据(100 客户 / 200 商品 / 500 订单 / 200 工单 + 4 个演示账号)
 curl localhost:8000/health
-open http://localhost:3000
+open http://localhost:3000        # 登录页:supervisor-01 / guardrail-demo
 ```
 
 本地不用 Docker 时:
@@ -301,7 +327,7 @@ run 置成 `RUNNING`,而 `RUNNING` 属于「可被领取」—— 补偿撤到�
 ```bash
 make api-test            # 快速套件:不需要数据库(状态机、配置、路由契约)
 make test-integration    # 集成测试:订单全链路 · 库存行锁 · 幂等 · 续跑 · 租约 · 审计 · 补偿
-make e2e                 # 端到端:提议 → 执行 → 审批 → 退款 + 治理看板 + 失败补偿(需整个栈在跑)
+make e2e                 # 端到端:提议 → 执行 → 审批 → 退款 + 治理看板 + 失败补偿 + 登录(需整个栈在跑)
 make demo-governance     # 演示 W2:kill -9 续跑 · 幂等重放 · 审计前后值
 make demo-planner        # 演示 W3:真模型跑规划器(需配 LLM_*,会消耗 token,不进 CI)
 make worker              # 常驻执行 worker(可起多个副本验证租约互斥)
@@ -355,7 +381,7 @@ GuardRail/
 | W5 | 多步编排:步骤依赖 + 参数引用 + 计划校验 + 只读额度工具 | ✅ |
 | W6 | 补偿 Saga:声明驱动 · 逆序 · 撤不干净就停手 · 幂等 · REST/UI 入口 | ✅ |
 | W7 | 崩溃矩阵:四种崩溃点 × 不变量是否成立(真 SIGKILL) | ✅ |
-| W8 | 开源收口:README 拆「已实现 / 规划中」+ 架构图标状态 | ✅ |
+| W8 | 身份层:登录 · 可撤销会话 · 记名审批不再依赖请求头自称;README 拆「已实现 / 规划中」 | ✅ |
 | 规划中 | MCP 传输层 · OTel/Langfuse · 指标看板 · 评测门禁 | ⬜ |
 
 ## 本地要求

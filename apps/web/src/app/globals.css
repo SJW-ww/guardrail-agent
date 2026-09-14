@@ -1,12 +1,35 @@
 @import "tailwindcss";
 
+/*
+ * 深色是审计语境,不是审美选择 —— 但纯黑会让信息层级塌掉。
+ * 这里用 canvas < surface < raised 三层底色:什么是最外层、什么是卡片、
+ * 什么是要被"拿起来"看的东西,一眼分得开。
+ */
+@theme {
+  --color-canvas: #0b0f14;
+  --color-surface: #11161d;
+  --color-raised: #171e27;
+  --color-line: #202834;
+  --color-line-strong: #2c3644;
+  --color-ink: #e6edf3;
+  --color-muted: #93a1b1;
+  --color-subtle: #64748b;
+  --color-brand: #34d399;
+  --color-brand-dim: #0f3d2e;
+}
+
 :root {
   color-scheme: dark;
 }
 
+html,
 body {
-  background-color: #0a0a0a;
-  color: #f5f5f5;
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
     "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -16,3 +39,12 @@ code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* 键盘用户也要看得见焦点环,不能因为深色就抹掉 */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--color-brand-dim);
+}

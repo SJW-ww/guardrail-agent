@@ -127,8 +127,8 @@ export function ConsoleClient() {
 
   return (
     <section className="space-y-4">
-      <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
-        <label htmlFor="intent" className="text-sm font-medium text-neutral-300">
+      <div className="space-y-2 rounded-lg border border-line bg-surface p-4">
+        <label htmlFor="intent" className="text-sm font-medium text-muted">
           你想做什么
         </label>
         <textarea
@@ -136,7 +136,7 @@ export function ConsoleClient() {
           value={intent}
           rows={2}
           onChange={(event) => setIntent(event.target.value)}
-          className="w-full resize-none rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm outline-none focus:border-emerald-600"
+          className="w-full resize-none rounded-md border border-line-strong bg-canvas px-3 py-2 text-sm outline-none focus:border-brand"
         />
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -152,7 +152,7 @@ export function ConsoleClient() {
               key={example}
               type="button"
               onClick={() => setIntent(example)}
-              className="rounded border border-neutral-800 px-2 py-1 text-xs text-neutral-500 hover:text-neutral-300"
+              className="rounded border border-line px-2 py-1 text-xs text-subtle hover:text-ink"
             >
               {example.slice(0, 16)}…
             </button>
@@ -165,8 +165,8 @@ export function ConsoleClient() {
       {plan && (
         <article className="space-y-3 rounded-lg border border-emerald-900/60 bg-emerald-950/10 p-4">
           <header className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold text-neutral-200">提议卡片</h2>
-            <span className="rounded bg-neutral-800 px-2 py-0.5 font-mono text-xs text-emerald-300">
+            <h2 className="text-sm font-semibold text-ink">提议卡片</h2>
+            <span className="rounded bg-raised px-2 py-0.5 font-mono text-xs text-emerald-300">
               {plan.steps.length} 步计划
             </span>
             {plan.steps.some((step) => step.requires_approval) && (
@@ -176,24 +176,24 @@ export function ConsoleClient() {
             )}
           </header>
 
-          <p className="text-sm text-neutral-300">{plan.goal}</p>
+          <p className="text-sm text-muted">{plan.goal}</p>
 
           <ol className="space-y-3">
             {plan.steps.map((step) => (
               <li
                 key={step.seq}
-                className="space-y-2 rounded-md border border-neutral-800 bg-neutral-950/50 p-3"
+                className="space-y-2 rounded-md border border-line bg-canvas p-3"
               >
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-xs text-neutral-500">#{step.seq}</span>
-                  <span className="rounded bg-neutral-800 px-2 py-0.5 font-mono text-xs text-emerald-300">
+                  <span className="font-mono text-xs text-subtle">#{step.seq}</span>
+                  <span className="rounded bg-raised px-2 py-0.5 font-mono text-xs text-emerald-300">
                     {step.action}
                   </span>
                   <span
                     className={`rounded px-2 py-0.5 text-xs ${
                       step.risk_level === "high"
                         ? "bg-rose-500/10 text-rose-300"
-                        : "bg-neutral-800 text-neutral-400"
+                        : "bg-raised text-muted"
                     }`}
                   >
                     {RISK_LEVEL_LABELS[step.risk_level as RiskLevel] ?? step.risk_level}
@@ -204,18 +204,18 @@ export function ConsoleClient() {
                     </span>
                   )}
                   {(step.depends_on ?? []).length > 0 && (
-                    <span className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">
+                    <span className="rounded bg-raised px-2 py-0.5 text-xs text-muted">
                       依赖第 {(step.depends_on ?? []).join("、")} 步
                     </span>
                   )}
                 </div>
 
                 {step.policy_reason && (
-                  <p className="rounded-md border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-xs text-neutral-400">
-                    <span className="font-mono text-neutral-500">
+                  <p className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-muted">
+                    <span className="font-mono text-subtle">
                       策略裁决 {step.policy_decision}
                     </span>
-                    <span className="mx-2 text-neutral-700">|</span>
+                    <span className="mx-2 text-line-strong">|</span>
                     {step.policy_reason}
                   </p>
                 )}
@@ -223,22 +223,22 @@ export function ConsoleClient() {
                 <dl className="grid gap-2 text-sm sm:grid-cols-2">
                   {Object.entries(step.arguments).map(([key, value]) => (
                     <div key={key} className="flex gap-2">
-                      <dt className="w-24 shrink-0 text-neutral-500">
+                      <dt className="w-24 shrink-0 text-subtle">
                         {ARGUMENT_LABELS[key] ?? key}
                       </dt>
-                      <dd className="font-mono text-neutral-200">
+                      <dd className="font-mono text-ink">
                         {describeArgument(key, value)}
                         {value !== null && typeof value === "object" && (
-                          <span className="ml-2 text-xs text-neutral-500">← 上游步骤的产出</span>
+                          <span className="ml-2 text-xs text-subtle">← 上游步骤的产出</span>
                         )}
                       </dd>
                     </div>
                   ))}
                 </dl>
 
-                <p className="text-sm text-neutral-300">{step.rationale}</p>
+                <p className="text-sm text-muted">{step.rationale}</p>
                 {(step.evidence ?? []).length > 0 && (
-                  <ul className="list-inside list-disc text-xs text-neutral-500">
+                  <ul className="list-inside list-disc text-xs text-subtle">
                     {(step.evidence ?? []).map((item) => (
                       <li key={item}>{item}</li>
                     ))}
@@ -264,10 +264,10 @@ export function ConsoleClient() {
       )}
 
       {execution && run && (
-        <article className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
+        <article className="space-y-3 rounded-lg border border-line bg-surface p-4">
           <header className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-neutral-200">执行结果</h2>
-            <span className="font-mono text-xs text-neutral-500">
+            <h2 className="text-sm font-semibold text-ink">执行结果</h2>
+            <span className="font-mono text-xs text-subtle">
               run={run.run_uid.slice(0, 8)} · actor={run.actor} · {execution.run.status}
             </span>
           </header>
@@ -304,9 +304,9 @@ export function ConsoleClient() {
 
       {trace.length > 0 && (
         <section className="space-y-2">
-          <h2 className="text-sm font-semibold text-neutral-300">
+          <h2 className="text-sm font-semibold text-muted">
             执行轨迹
-            <span className="ml-2 font-mono text-xs font-normal text-neutral-500">
+            <span className="ml-2 font-mono text-xs font-normal text-subtle">
               每一步都落在 run / step 表里,可查可续跑
             </span>
           </h2>
@@ -316,8 +316,8 @@ export function ConsoleClient() {
                 <span className={item.status === "done" ? "text-emerald-400" : "text-rose-400"}>
                   {item.status === "done" ? "✓" : "✗"}
                 </span>
-                <span className="w-32 shrink-0 text-neutral-400">{item.label}</span>
-                <span className="text-neutral-500">{item.detail}</span>
+                <span className="w-32 shrink-0 text-muted">{item.label}</span>
+                <span className="text-subtle">{item.detail}</span>
               </li>
             ))}
           </ol>

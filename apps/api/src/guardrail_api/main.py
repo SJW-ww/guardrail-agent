@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from guardrail_api import __version__
-from guardrail_api.api.routes import audit, health, orders, planner, runs, tickets
+from guardrail_api.api.routes import audit, auth, health, orders, planner, runs, tickets
 from guardrail_api.api.routes import tools as tools_routes
 from guardrail_api.config import get_settings
 from guardrail_api.db import dispose_engine
@@ -35,6 +35,9 @@ STATUS_BY_ERROR_CODE = {
     "planner_unavailable": 503,
     # 不是「你说错了」,是「你不能做这件事」
     "policy_denied": 403,
+    # 没登录、会话失效、口令不对 —— 都是「先证明你是谁」
+    "unauthenticated": 401,
+    "invalid_credentials": 401,
 }
 DEFAULT_ERROR_STATUS = 400
 
@@ -96,6 +99,7 @@ def create_app() -> FastAPI:
     )
     register_error_handlers(app)
     app.include_router(health.router, tags=["health"])
+    app.include_router(auth.router)
     app.include_router(orders.router)
     app.include_router(tickets.router)
     app.include_router(tools_routes.router)

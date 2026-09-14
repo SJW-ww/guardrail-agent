@@ -1,5 +1,6 @@
 import type {
   AuditListResponse,
+  AuditOutcome,
   CancelOrderRequest,
   CompensateResponse,
   ExecuteRunResponse,
@@ -73,6 +74,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     cache: "no-store",
+    // 会话是 HttpOnly cookie:不带这一行,跨端口的 API 调用不会带上它
+    credentials: "include",
   });
 
   if (!response.ok) {
@@ -84,6 +87,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       payload?.error?.context ?? {},
     );
   }
+  // 204 没有响应体(登出就是),硬 parse 会炸
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -95,6 +100,25 @@ function query(params: Record<string, string | number | undefined>): string {
   const serialized = search.toString();
   return serialized ? `?${serialized}` : "";
 }
+
+// --- 身份 ---
+
+export type Principal = {
+  username: string;
+  display_name: string;
+  role: string;
+  /** 审计里记下来的执行体身份,形如 `human:supervisor-01` */
+  actor: string;
+};
+
+export type SessionResponse = { principal: Principal; expires_at: string };
+
+export const getMe = () => request<SessionResponse>("/auth/me");
+
+export const login = (username: string, password: string) =>
+  request<SessionResponse>("/auth/login", { method: "POST", body: { username, password } });
+
+export const logout = () => request<void>("/auth/logout", { method: "POST" });
 
 // --- 平台 ---
 
@@ -191,5 +215,12 @@ export const approveStep = (runUid: string, seq: number, actor: string) =>
   request<RunDetail>(`/api/runs/${runUid}/steps/${seq}/approve`, { method: "POST", actor });
 
 export const listAudit = (
-  params: { run_uid?: string; trace_id?: string; tool_name?: string; limit?: number } = {},
+  params: {
+    run_uid?: string;
+    trace_id?: string;
+    tool_name?: string;
+    outcome?: AuditOutcome;
+    limit?: number;
+    offset?: number;
+  } = {},
 ) => request<AuditListResponse>(`/api/audit${query(params)}`);

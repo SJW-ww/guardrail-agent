@@ -143,7 +143,7 @@ async def ticket_snapshot(context: ToolContext, params: CloseTicketParams) -> di
     ),
     side_effect="创建一条 PENDING 状态的售后工单(未退款)",
     idempotent=True,
-    idempotency_key="hash(run_id, tool, args)",
+    idempotency_key="hash(run_uid, tool, args)",
     compensate_tool="close_ticket",
     # 补偿参数从原步骤的产出里取:退款工单的 ticket_id 是这次写入产生的,
     # 只有它才能精确地把这一条关掉(而不是"关掉这张订单上的某个工单")。
@@ -220,7 +220,7 @@ async def query_refundable(context: ToolContext, params: QueryRefundableParams) 
     preconditions=("工单处于 PENDING 状态",),
     side_effect="把售后工单置为 CLOSED",
     idempotent=True,
-    idempotency_key="hash(run_id, tool, args)",
+    idempotency_key="hash(run_uid, tool, args)",
     snapshot=ticket_snapshot,
     reason_field="reason",
     tags=("aftersales", "write"),

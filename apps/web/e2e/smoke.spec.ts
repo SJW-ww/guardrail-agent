@@ -321,3 +321,20 @@ test("失败执行触发补偿:撤不干净时停在等人点,点了才真的撤
   const ticket = after.items.find((item) => item.order_id === order.order_id);
   expect(ticket?.status).toBe("CLOSED");
 });
+
+test("登录后审批以本人名义签署,登出即失效", async ({ page }) => {
+  // 审批是记名动作 —— 签之前必须能在界面上核对"我现在是谁"
+  await page.goto("/login");
+  await page.getByLabel("用户名").fill("finance-01");
+  await page.getByLabel("口令").fill("guardrail-demo");
+  await page.getByRole("button", { name: "登录" }).click();
+
+  await expect(page.getByText("周财务")).toBeVisible();
+  await expect(page.getByText("human:finance-01")).toBeVisible();
+
+  await page.goto("/approvals");
+  await expect(page.getByText(/以 human:finance-01 的名义签署/)).toBeVisible();
+
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page).toHaveURL(/\/login$/);
+});

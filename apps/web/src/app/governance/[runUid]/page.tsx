@@ -58,7 +58,7 @@ const COMPENSATION_NOTICE: Record<string, { tone: string; text: string }> = {
     text: "这次执行的写操作已按声明逆序撤销完毕。",
   },
   NOTHING_TO_ROLLBACK: {
-    tone: "border-neutral-800 bg-neutral-900/40 text-neutral-300",
+    tone: "border-line bg-surface text-muted",
     text: "这次执行没有产生需要撤销的写操作。",
   },
   NEEDS_APPROVAL: {
@@ -110,9 +110,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
     return (
       <div className="space-y-6">
         <section className="space-y-2">
-          <p className="font-mono text-xs text-neutral-500">执行 {run.run_uid}</p>
+          <p className="font-mono text-xs text-subtle">执行 {run.run_uid}</p>
           <h1 className="text-xl font-semibold">{run.goal}</h1>
-          <p className="text-sm text-neutral-400">
+          <p className="text-sm text-muted">
             断点 {run.checkpoint_seq} / {total} 步 · actor={run.actor} · trace=
             <span className="font-mono">{run.trace_id.slice(0, 12)}</span> · 领取次数 {run.attempt}
           </p>
@@ -120,7 +120,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
             <p
               className={`rounded-md border px-3 py-2 text-sm ${
                 run.status === "COMPENSATED"
-                  ? "border-neutral-800 bg-neutral-900/40 text-neutral-300"
+                  ? "border-line bg-surface text-muted"
                   : "border-rose-900 bg-rose-950/30 text-rose-300"
               }`}
             >
@@ -155,9 +155,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
         )}
 
         {Object.entries(run.approvals ?? {}).length > 0 && (
-          <section className="space-y-1 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3">
-            <p className="font-mono text-xs text-neutral-500">审批记录(谁为哪一步签的字)</p>
-            <ul className="space-y-0.5 text-sm text-neutral-300">
+          <section className="space-y-1 rounded-lg border border-line bg-surface px-4 py-3">
+            <p className="font-mono text-xs text-subtle">审批记录(谁为哪一步签的字)</p>
+            <ul className="space-y-0.5 text-sm text-muted">
               {Object.entries(run.approvals ?? {}).map(([seq, approvers]) => (
                 <li key={seq}>
                   步骤 #{seq} ← <span className="font-mono">{approvers.join("、")}</span>
@@ -181,10 +181,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
         />
 
         <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-neutral-300">步骤</h2>
-          <div className="overflow-hidden rounded-lg border border-neutral-800">
+          <h2 className="text-sm font-semibold text-muted">步骤</h2>
+          <div className="overflow-hidden rounded-lg border border-line">
             <table className="w-full text-left text-sm">
-              <thead className="bg-neutral-900/60 text-xs uppercase tracking-wide text-neutral-500">
+              <thead className="bg-surface text-xs uppercase tracking-wide text-subtle">
                 <tr>
                   <th className="px-4 py-2 font-medium">#</th>
                   <th className="px-4 py-2 font-medium">工具</th>
@@ -196,17 +196,17 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
               </thead>
               <tbody>
                 {run.steps.map((step) => (
-                  <tr key={step.seq} className="border-t border-neutral-800/70 align-top">
-                    <td className="px-4 py-2 font-mono text-neutral-400">{step.seq}</td>
-                    <td className="px-4 py-2 font-mono text-neutral-200">{step.tool_name}</td>
+                  <tr key={step.seq} className="border-t border-line align-top">
+                    <td className="px-4 py-2 font-mono text-muted">{step.seq}</td>
+                    <td className="px-4 py-2 font-mono text-ink">{step.tool_name}</td>
                     <td className="px-4 py-2">
                       <StepBadge status={step.status} />
                     </td>
-                    <td className="px-4 py-2 font-mono text-xs text-neutral-400">{step.attempt}</td>
-                    <td className="px-4 py-2 font-mono text-[11px] text-neutral-600">
+                    <td className="px-4 py-2 font-mono text-xs text-muted">{step.attempt}</td>
+                    <td className="px-4 py-2 font-mono text-[11px] text-subtle">
                       {step.idempotency_key ? step.idempotency_key.slice(0, 10) : "—"}
                     </td>
-                    <td className="px-4 py-2 text-xs text-neutral-500">
+                    <td className="px-4 py-2 text-xs text-subtle">
                       {step.error
                         ? step.error
                         : step.replayed
@@ -216,8 +216,8 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
                   </tr>
                 ))}
                 {run.steps.length === 0 && (
-                  <tr className="border-t border-neutral-800/70">
-                    <td colSpan={6} className="px-4 py-6 text-center text-neutral-500">
+                  <tr className="border-t border-line">
+                    <td colSpan={6} className="px-4 py-6 text-center text-subtle">
                       还没有步骤被提交
                     </td>
                   </tr>
@@ -225,24 +225,24 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-neutral-500">
+          <p className="text-xs text-subtle">
             计划的全部步骤:{run.plan.map((item) => `#${item.seq} ${item.tool}`).join(" · ")}
           </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-neutral-300">这次执行产生的审计</h2>
+          <h2 className="text-sm font-semibold text-muted">这次执行产生的审计</h2>
           {audit.items.map((entry) => (
-            <article key={entry.id} className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
-              <header className="flex flex-wrap items-center gap-3 text-xs text-neutral-500">
-                <span className="font-mono text-neutral-200">{entry.tool_name}</span>
+            <article key={entry.id} className="space-y-2 rounded-lg border border-line bg-surface p-4">
+              <header className="flex flex-wrap items-center gap-3 text-xs text-subtle">
+                <span className="font-mono text-ink">{entry.tool_name}</span>
                 <span>step #{entry.step_seq}</span>
                 <span>{formatDateTime(entry.created_at)}</span>
               </header>
-              {entry.reason && <p className="text-sm text-neutral-400">理由:{entry.reason}</p>}
+              {entry.reason && <p className="text-sm text-muted">理由:{entry.reason}</p>}
               {entry.policy_reason && (
-                <p className="text-xs text-neutral-500">
-                  <span className="font-mono text-neutral-600">
+                <p className="text-xs text-subtle">
+                  <span className="font-mono text-subtle">
                     策略 {entry.policy_decision}:
                   </span>{" "}
                   {entry.policy_reason}
@@ -251,11 +251,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
               <ul className="space-y-1 font-mono text-xs">
                 {diffSnapshots(entry.before ?? {}, entry.after ?? {}).map((change) => (
                   <li key={change.path} className="flex flex-wrap items-baseline gap-2">
-                    <span className="text-neutral-400">{change.path}</span>
+                    <span className="text-muted">{change.path}</span>
                     <span className="text-rose-300/80 line-through">
                       {describeValue(change.before)}
                     </span>
-                    <span className="text-neutral-600">→</span>
+                    <span className="text-subtle">→</span>
                     <span className="text-emerald-300">{describeValue(change.after)}</span>
                   </li>
                 ))}
@@ -263,13 +263,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runU
             </article>
           ))}
           {audit.items.length === 0 && (
-            <p className="rounded-lg border border-neutral-800 px-4 py-6 text-center text-sm text-neutral-500">
+            <p className="rounded-lg border border-line px-4 py-6 text-center text-sm text-subtle">
               还没有写操作(只读步骤不写审计)
             </p>
           )}
         </section>
 
-        <p className="text-xs text-neutral-600">
+        <p className="text-xs text-subtle">
           提示:金额字段单位是「分」,展示时按 {formatCents(100)} 换算。
         </p>
       </div>

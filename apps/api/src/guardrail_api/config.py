@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # 默认 L2 档下 low 风险的补偿动作仍会要求人工确认,于是 auto 会退化成"提示人来点"。
     compensation_mode: Literal["auto", "manual", "off"] = "auto"
 
+    # --- 身份(W8)---
+    # 演示账号的初始口令。真实部署必须覆盖它 —— 它只用来让 `make seed-reset`
+    # 之后的演示环境能直接登录。
+    demo_password: str = "guardrail-demo"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

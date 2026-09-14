@@ -73,7 +73,7 @@ def test_high_risk_tool_declares_idempotency_and_compensation() -> None:
 
     assert spec.risk_level is RiskLevel.HIGH
     assert spec.idempotent
-    assert spec.idempotency_key == "hash(run_id, tool, args)"
+    assert spec.idempotency_key == "hash(run_uid, tool, args)"
     assert spec.compensate_tool == "close_ticket"
     assert spec.preconditions
 
@@ -134,7 +134,7 @@ def test_high_risk_tool_without_compensation_cannot_register() -> None:
                 handler=ping_handler,
                 side_effect="动钱",
                 idempotent=True,
-                idempotency_key="hash(run_id, tool, args)",
+                idempotency_key="hash(run_uid, tool, args)",
                 snapshot=ping_snapshot,
             )
         )
@@ -169,7 +169,7 @@ def test_broken_compensation_reference_fails_validation() -> None:
             handler=ping_handler,
             side_effect="动钱",
             idempotent=True,
-            idempotency_key="hash(run_id, tool, args)",
+            idempotency_key="hash(run_uid, tool, args)",
             compensate_tool="not_registered_anywhere",
             # 补偿参数声明齐了,才能走到「补偿目标是否存在」这一步自检 ——
             # 少声明参数会先被注册期拦下,测不到这里想测的分支。

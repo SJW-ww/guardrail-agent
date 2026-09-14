@@ -15,6 +15,8 @@ import random
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from guardrail_api.auth import hash_password
+from guardrail_api.config import get_settings
 from guardrail_api.db import dispose_engine, get_session_factory
 from guardrail_api.models import (
     REFUND_REASON_CODES,
@@ -25,6 +27,7 @@ from guardrail_api.models import (
     Order,
     OrderItem,
     OrderStatus,
+    Principal,
     Product,
     ProductStatus,
 )
@@ -38,6 +41,15 @@ PRODUCT_COUNT = 200
 ORDER_COUNT = 500
 TICKET_COUNT = 200
 INITIAL_STOCK = 300
+
+# 演示账号:`<身份> = <角色>`。角色只在双人复核里起作用(两个不同角色才算两个人),
+# 但它是组织事实,不该由调用方在请求头里自称。
+DEMO_ACCOUNTS = (
+    ("supervisor-01", "林主管", "supervisor"),
+    ("supervisor-02", "陈主管", "supervisor"),
+    ("finance-01", "周财务", "finance"),
+    ("operator-01", "客服小吴", "operations"),
+)
 
 WAREHOUSES = ("WH-SZ-01", "WH-DG-02", "WH-SH-03")
 CITIES = ("深圳市南山区科技园南路 1 号", "东莞市松山湖园区 8 栋", "上海市浦东新区张江路 66 号")
@@ -194,9 +206,37 @@ async def _existing_orders(session: AsyncSession) -> int:
     return int(await session.scalar(select(func.count()).select_from(Order)) or 0)
 
 
+async def ensure_principals(session: AsyncSession) -> int:
+    """幂等地建好演示账号。
+
+    已存在的账号**不动**:重灌演示数据不该把别人改过的口令重置回去。
+    """
+    settings = get_settings()
+    created = 0
+    for username, display_name, role in DEMO_ACCOUNTS:
+        exists = await session.scalar(select(Principal).where(Principal.username == username))
+        if exists is not None:
+            continue
+        session.add(
+            Principal(
+                username=username,
+                display_name=display_name,
+                role=role,
+                password_hash=hash_password(settings.demo_password),
+            )
+        )
+        created += 1
+    await session.commit()
+    return created
+
+
 async def main(reset: bool) -> None:
     factory = get_session_factory()
     async with factory() as session:
+        new_accounts = await ensure_principals(session)
+        if new_accounts:
+            print(f"身份:{new_accounts} 个演示账号已建好(口令见 DEMO_PASSWORD,默认 guardrail-demo)")
+
         existing = await _existing_orders(session)
         if existing and not reset:
             print(f"已有 {existing} 条订单,跳过。需要重建请加 --reset")
